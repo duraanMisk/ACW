@@ -1,0 +1,20 @@
+# Core dependencies
+boto3==1.35.0
+click==8.1.7
+rich==13.7.0
+pandas==2.2.0
+numpy==1.26.3
+
+# AWS CDK (for infrastructure)
+aws-cdk-lib==2.147.0
+constructs>=10.0.0
+
+# Testing
+pytest==8.0.0
+pytest-mock==3.12.0
+moto==5.0.0
+
+# Development
+black==24.1.0
+flake8==7.0.0
+mypy==1.8.0

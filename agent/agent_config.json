@@ -1,0 +1,6 @@
+{
+  "agent_id": "MXUZMBTQFV",
+  "alias_id": "MPGG39Y8EK",
+  "agent_arn": "arn:aws:bedrock:us-east-1:120569639479:agent/MXUZMBTQFV",
+  "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+}

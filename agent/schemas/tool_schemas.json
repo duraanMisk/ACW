@@ -1,0 +1,249 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "CFD Optimization Tools API",
+    "version": "1.0.0",
+    "description": "Tool interfaces for autonomous CFD design optimization"
+  },
+  "paths": {
+    "/generate_geometry": {
+      "post": {
+        "summary": "Generate airfoil geometry from NACA parameters",
+        "description": "Creates and validates airfoil geometry based on NACA 4-series parameterization. Returns geometry ID and mesh quality assessment.",
+        "operationId": "generateGeometry",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["thickness", "max_camber", "camber_position", "alpha"],
+                "properties": {
+                  "thickness": {
+                    "type": "number",
+                    "description": "Airfoil thickness as fraction of chord (0.08 to 0.20). Affects drag and structural strength.",
+                    "minimum": 0.08,
+                    "maximum": 0.20
+                  },
+                  "max_camber": {
+                    "type": "number",
+                    "description": "Maximum camber as fraction of chord (0.0 to 0.08). Affects lift and drag.",
+                    "minimum": 0.0,
+                    "maximum": 0.08
+                  },
+                  "camber_position": {
+                    "type": "number",
+                    "description": "Position of maximum camber as fraction of chord (0.2 to 0.6). Affects lift distribution.",
+                    "minimum": 0.2,
+                    "maximum": 0.6
+                  },
+                  "alpha": {
+                    "type": "number",
+                    "description": "Angle of attack in degrees (-2 to 10). Affects lift and drag significantly.",
+                    "minimum": -2.0,
+                    "maximum": 10.0
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Geometry generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "geometry_id": {
+                      "type": "string",
+                      "description": "Unique identifier for this geometry (NACA format)"
+                    },
+                    "valid": {
+                      "type": "boolean",
+                      "description": "Whether geometry passed validation checks"
+                    },
+                    "warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "List of warnings about potential issues"
+                    },
+                    "mesh_quality_score": {
+                      "type": "number",
+                      "description": "Mesh quality assessment (0 to 1, higher is better)",
+                      "minimum": 0.0,
+                      "maximum": 1.0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/run_cfd": {
+      "post": {
+        "summary": "Run CFD simulation on geometry",
+        "description": "Executes computational fluid dynamics simulation and returns aerodynamic coefficients. May take 1-2 minutes to complete.",
+        "operationId": "runCFD",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["geometry_id"],
+                "properties": {
+                  "geometry_id": {
+                    "type": "string",
+                    "description": "Geometry identifier from generate_geometry"
+                  },
+                  "reynolds": {
+                    "type": "number",
+                    "description": "Reynolds number (100000 to 10000000). Default: 500000",
+                    "default": 500000,
+                    "minimum": 100000,
+                    "maximum": 10000000
+                  },
+                  "convergence_criteria": {
+                    "type": "number",
+                    "description": "Residual threshold for convergence. Default: 1e-6",
+                    "default": 1e-6
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "CFD simulation completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "Cl": {
+                      "type": "number",
+                      "description": "Lift coefficient"
+                    },
+                    "Cd": {
+                      "type": "number",
+                      "description": "Drag coefficient (optimization objective: minimize)"
+                    },
+                    "L_D": {
+                      "type": "number",
+                      "description": "Lift to drag ratio (higher is better)"
+                    },
+                    "converged": {
+                      "type": "boolean",
+                      "description": "Whether simulation converged successfully"
+                    },
+                    "iterations": {
+                      "type": "integer",
+                      "description": "Number of solver iterations"
+                    },
+                    "computation_time": {
+                      "type": "number",
+                      "description": "Elapsed time in seconds"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/get_next_candidates": {
+      "post": {
+        "summary": "Propose next optimization candidates",
+        "description": "Analyzes design history and proposes next parameter sets to evaluate using trust-region optimization strategy.",
+        "operationId": "getNextCandidates",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["current_best_cd", "iteration_number"],
+                "properties": {
+                  "current_best_cd": {
+                    "type": "number",
+                    "description": "Best drag coefficient achieved so far"
+                  },
+                  "constraint_cl_min": {
+                    "type": "number",
+                    "description": "Minimum required lift coefficient. Default: 0.30",
+                    "default": 0.30
+                  },
+                  "iteration_number": {
+                    "type": "integer",
+                    "description": "Current iteration number (affects strategy)",
+                    "minimum": 1
+                  },
+                  "best_design": {
+                    "type": "object",
+                    "description": "Current best design parameters (optional)",
+                    "properties": {
+                      "thickness": {"type": "number"},
+                      "max_camber": {"type": "number"},
+                      "camber_position": {"type": "number"},
+                      "alpha": {"type": "number"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Candidates proposed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "candidates": {
+                      "type": "array",
+                      "description": "List of 3-5 parameter sets to evaluate next",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "thickness": {"type": "number"},
+                          "max_camber": {"type": "number"},
+                          "camber_position": {"type": "number"},
+                          "alpha": {"type": "number"}
+                        }
+                      }
+                    },
+                    "strategy": {
+                      "type": "string",
+                      "enum": ["explore", "exploit", "refine"],
+                      "description": "Optimization strategy for this iteration"
+                    },
+                    "rationale": {
+                      "type": "string",
+                      "description": "Explanation of why these candidates were chosen"
+                    },
+                    "confidence": {
+                      "type": "number",
+                      "description": "Confidence in proposed candidates (0 to 1)",
+                      "minimum": 0.0,
+                      "maximum": 1.0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

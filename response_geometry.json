@@ -1,0 +1,1 @@
+{"messageVersion": "1.0", "response": {"actionGroup": "generate-geometry", "apiPath": "/generate_geometry", "httpMethod": "POST", "httpStatusCode": 400, "responseBody": {"application/json": {"body": "{\"error\": \"Missing required parameters: thickness, max_camber, camber_position, alpha\"}"}}}}

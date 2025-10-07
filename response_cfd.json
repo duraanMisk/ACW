@@ -1,0 +1,1 @@
+{"messageVersion": "1.0", "response": {"actionGroup": null, "apiPath": null, "httpMethod": null, "httpStatusCode": 200, "responseBody": {"application/json": {"body": "{\"Cl\": 0.2507, \"Cd\": 0.01125, \"L_D\": 22.28, \"converged\": true, \"iterations\": 230, \"computation_time\": 70.39}"}}}}

@@ -1,0 +1,4 @@
+timestamp,iteration,candidate_count,best_cd,best_geometry_id,strategy,trust_radius,confidence,notes
+2025-10-07T01:59:43.669486,1,1,0.0142,NACA4412_a2.0,baseline,0.0,1.0,Initial baseline
+2025-10-07T01:59:43.670488,2,5,0.0138,NACA4410_a2.5,explore,0.015,0.65,Exploration phase
+2025-10-07T01:59:43.670488,3,4,0.0135,NACA4408_a3.0,exploit,0.01,0.75,Exploitation phase

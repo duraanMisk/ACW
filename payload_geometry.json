@@ -1,0 +1,8 @@
+{
+  "parameters": {
+    "thickness": 0.12,
+    "max_camber": 0.04,
+    "camber_position": 0.4,
+    "alpha": 2.0
+  }
+}
