@@ -1,0 +1,3 @@
+timestamp,geometry_id,thickness,max_camber,camber_position,alpha,Cl,Cd,L_D,converged,reynolds,iterations,computation_time
+2025-10-09T14:21:30.908375,NACA4412_a4.0,0.12,0.04,0.4,2.0,0.7742,0.04537,17.06,True,500000,182,61.99
+2025-10-09T14:22:06.093129,NACA5413_a1.5,0.13,0.05,0.4,2.0,0.8725,0.05563,15.69,True,500000,217,68.75
