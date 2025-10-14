@@ -1,34 +1,26 @@
 """
-Lambda function for optimization candidate generation with CSV storage integration.
-Uses trust-region strategy and reads design history.
+Lambda function for optimization candidate generation with S3 storage integration.
+Uses trust-region strategy and reads design history from S3.
 """
 
 import json
 import random
 import os
-import sys
 from datetime import datetime
 
-# Add shared directory to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
-
+# Import S3 storage modules
 try:
-    from storage import DesignHistoryStorage, ResultsStorage
-
-    STORAGE_ENABLED = True
+    from storage_s3 import S3DesignHistoryStorage, S3ResultsStorage
+    from session_manager import SessionManager
+    S3_ENABLED = True
 except ImportError:
-    print("WARNING: Storage module not available, running without persistence")
-    STORAGE_ENABLED = False
+    print("WARNING: S3 storage modules not available")
+    S3_ENABLED = False
 
 
 def get_optimization_strategy(iteration_number):
     """
     Determine optimization strategy based on iteration number.
-
-    Strategy evolution:
-    - Early (1-2): Explore - broad sampling
-    - Middle (3-5): Exploit - focus on promising regions
-    - Late (6+): Refine - local optimization
 
     Returns:
         (strategy: str, trust_radius: float)
@@ -49,13 +41,10 @@ def clip_parameter(value, min_val, max_val):
 def generate_exploration_candidates(num_candidates=4):
     """
     Generate diverse candidates for early exploration.
-
-    Samples broadly across the design space to find promising regions.
     """
     candidates = []
 
     for i in range(num_candidates):
-        # Random sampling with slight bias toward middle of ranges
         thickness = random.uniform(0.10, 0.14)
         max_camber = random.uniform(0.03, 0.06)
         camber_position = random.uniform(0.35, 0.45)
@@ -82,29 +71,17 @@ def generate_exploration_candidates(num_candidates=4):
 def generate_trust_region_candidates(best_design, trust_radius, constraint_cl_min, num_candidates=4):
     """
     Generate candidates around the best design using trust-region method.
-
-    Args:
-        best_design: dict with thickness, max_camber, camber_position, alpha
-        trust_radius: float, how far to search from best design
-        constraint_cl_min: float, minimum Cl requirement
-        num_candidates: int, number of candidates to generate
-
-    Returns:
-        list of candidate dicts
     """
-    candidates = []
-
-    # If we don't have a best design yet, fall back to exploration
     if not best_design:
         return generate_exploration_candidates(num_candidates)
 
+    candidates = []
+
     for i in range(num_candidates):
-        # Perturb each parameter within trust region
         thickness = best_design.get('thickness', 0.12) + random.uniform(-trust_radius, trust_radius)
         max_camber = best_design.get('max_camber', 0.04) + random.uniform(-trust_radius, trust_radius)
         camber_position = best_design.get('camber_position', 0.40) + random.uniform(-trust_radius, trust_radius)
-        alpha = best_design.get('alpha', 2.0) + random.uniform(-trust_radius * 50,
-                                                               trust_radius * 50)  # Larger range for alpha
+        alpha = best_design.get('alpha', 2.0) + random.uniform(-trust_radius * 50, trust_radius * 50)
 
         # Clip to valid bounds
         thickness = clip_parameter(thickness, 0.08, 0.20)
@@ -122,17 +99,17 @@ def generate_trust_region_candidates(best_design, trust_radius, constraint_cl_mi
     return candidates
 
 
-def analyze_design_history(storage):
+def analyze_design_history_s3(storage):
     """
-    Analyze design history to find best design and iteration info.
+    Analyze design history from S3 to find best design.
 
     Returns:
         dict with best_design, best_cd, best_cl, iteration_count
     """
     try:
-        history_df = storage.read_design_history()
+        designs = storage.read_all_designs()
 
-        if history_df.empty:
+        if not designs:
             return {
                 'best_design': None,
                 'best_cd': None,
@@ -141,33 +118,31 @@ def analyze_design_history(storage):
             }
 
         # Filter for converged designs only
-        converged = history_df[history_df['converged'] == True]
+        converged = [d for d in designs if d.get('converged', False)]
 
-        if converged.empty:
+        if not converged:
             return {
                 'best_design': None,
                 'best_cd': None,
                 'best_cl': None,
-                'iteration_count': len(history_df)
+                'iteration_count': len(designs)
             }
 
-        # Find design with lowest Cd that satisfies constraint
-        # (assumes constraint_cl_min = 0.30, will be validated by agent)
-        best_idx = converged['Cd'].idxmin()
-        best_row = converged.loc[best_idx]
+        # Find design with lowest Cd
+        best = min(converged, key=lambda d: d.get('Cd', float('inf')))
 
         best_design = {
-            'thickness': float(best_row['thickness']),
-            'max_camber': float(best_row['max_camber']),
-            'camber_position': float(best_row['camber_position']),
-            'alpha': float(best_row['alpha'])
+            'thickness': best['thickness'],
+            'max_camber': best['max_camber'],
+            'camber_position': best['camber_position'],
+            'alpha': best['alpha']
         }
 
         return {
             'best_design': best_design,
-            'best_cd': float(best_row['Cd']),
-            'best_cl': float(best_row['Cl']),
-            'iteration_count': len(history_df)
+            'best_cd': best['Cd'],
+            'best_cl': best['Cl'],
+            'iteration_count': len(designs)
         }
 
     except Exception as e:
@@ -182,23 +157,7 @@ def analyze_design_history(storage):
 
 def lambda_handler(event, context):
     """
-    Lambda handler for candidate generation.
-
-    Bedrock Agent sends parameters in this format:
-    {
-        "requestBody": {
-            "content": {
-                "application/json": {
-                    "properties": [
-                        {"name": "current_best_cd", "value": "0.0142"},
-                        {"name": "iteration_number", "value": "2"},
-                        {"name": "constraint_cl_min", "value": "0.30"},
-                        {"name": "best_design", "value": "{...}"}  // optional
-                    ]
-                }
-            }
-        }
-    }
+    Lambda handler for candidate generation with S3 integration.
     """
     print(f"Received event: {json.dumps(event)}")
 
@@ -223,8 +182,9 @@ def lambda_handler(event, context):
         iteration_number = int(params.get('iteration_number', 1))
         current_best_cd = float(params.get('current_best_cd', 0.015))
         constraint_cl_min = float(params.get('constraint_cl_min', 0.30))
+        session_id = params.get('session_id')  # NEW: Get session ID
 
-        # Best design is optional (might not exist yet)
+        # Best design is optional
         best_design = None
         if 'best_design' in params:
             try:
@@ -232,31 +192,33 @@ def lambda_handler(event, context):
             except:
                 best_design = None
 
-        # === READ DESIGN HISTORY (if available) ===
+        # === READ DESIGN HISTORY FROM S3 ===
         history_analysis = None
-        if STORAGE_ENABLED:
+        if S3_ENABLED and session_id:
             try:
-                storage = DesignHistoryStorage()
-                history_analysis = analyze_design_history(storage)
-                print(f"History analysis: {history_analysis}")
+                storage = S3DesignHistoryStorage(session_id)
+                history_analysis = analyze_design_history_s3(storage)
+                print(f"History analysis from S3: {history_analysis}")
 
                 # Use historical best if we don't have one passed in
                 if not best_design and history_analysis['best_design']:
                     best_design = history_analysis['best_design']
                     current_best_cd = history_analysis['best_cd']
+                    print(f"✓ Retrieved best design from S3: Cd={current_best_cd:.5f}")
 
             except Exception as e:
-                print(f"WARNING: Could not read design history: {e}")
+                print(f"WARNING: Could not read design history from S3: {e}")
+        elif not session_id:
+            print(f"⚠ Warning: No session_id provided, cannot read S3 history")
 
         # === DETERMINE OPTIMIZATION STRATEGY ===
         strategy, trust_radius = get_optimization_strategy(iteration_number)
-
         print(f"Strategy: {strategy}, Trust radius: {trust_radius}")
 
         # === GENERATE CANDIDATES ===
         if strategy == "explore":
             candidates = generate_exploration_candidates(num_candidates=4)
-            rationale = f"Early exploration phase - sampling diverse design space (includes 1 wildcard for diversity)"
+            rationale = f"Early exploration phase - sampling diverse design space"
             confidence = 0.6
         else:
             candidates = generate_trust_region_candidates(
@@ -277,10 +239,10 @@ def lambda_handler(event, context):
 
         print(f"Generated {len(candidates)} candidates with strategy '{strategy}'")
 
-        # === PERSIST ITERATION SUMMARY TO RESULTS CSV ===
-        if STORAGE_ENABLED:
+        # === PERSIST ITERATION SUMMARY TO S3 ===
+        if S3_ENABLED and session_id:
             try:
-                results_storage = ResultsStorage()
+                results_storage = S3ResultsStorage(session_id)
 
                 iteration_data = {
                     'timestamp': datetime.utcnow().isoformat(),
@@ -294,10 +256,16 @@ def lambda_handler(event, context):
                 }
 
                 results_storage.write_result(iteration_data)
-                print(f"Successfully wrote iteration summary to results.csv")
+                print(f"✓ Wrote iteration summary to S3 (session: {session_id})")
+
+                # Update session metadata
+                manager = SessionManager(session_id)
+                manager.update_session({
+                    'current_iteration': iteration_number
+                })
 
             except Exception as storage_error:
-                print(f"WARNING: Failed to write to results.csv: {storage_error}")
+                print(f"⚠ Warning: Failed to write to S3: {storage_error}")
                 # Continue anyway
 
         # === RETURN RESPONSE ===
@@ -346,25 +314,3 @@ def create_error_response(error_message):
             }
         }
     }
-
-
-# For local testing
-if __name__ == "__main__":
-    # Test event
-    test_event = {
-        'requestBody': {
-            'content': {
-                'application/json': {
-                    'properties': [
-                        {'name': 'current_best_cd', 'value': '0.0142'},
-                        {'name': 'iteration_number', 'value': '3'},
-                        {'name': 'constraint_cl_min', 'value': '0.30'}
-                    ]
-                }
-            }
-        }
-    }
-
-    result = lambda_handler(test_event, None)
-    print("\n=== TEST RESULT ===")
-    print(json.dumps(result, indent=2))

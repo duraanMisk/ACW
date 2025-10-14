@@ -12,10 +12,14 @@ from aws_cdk import (
 )
 from constructs import Construct
 import json
+from typing import TYPE_CHECKING, Optional
+if TYPE_CHECKING:
+    from .storage_stack import StorageStack
 
 
 class AgentStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str,
+                 storage_stack: Optional['StorageStack'] = None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         # ==========================================
@@ -128,6 +132,32 @@ class AgentStack(Stack):
             "run_cfd": run_cfd_fn.function_arn,
             "get_next_candidates": get_candidates_fn.function_arn,
         }
+
+        if storage_stack:
+            print("Granting S3 and SSM access to tool Lambdas...")
+
+            # Tool Lambdas need S3 read/write
+            tool_lambdas = [
+                generate_geometry_fn,
+                run_cfd_fn,
+                get_candidates_fn
+            ]
+
+            for lambda_fn in tool_lambdas:
+                # S3 access
+                storage_stack.bucket.grant_read_write(lambda_fn)
+
+                # SSM read access (to get session_id from execution_id)
+                lambda_fn.add_to_role_policy(iam.PolicyStatement(
+                    actions=["ssm:GetParameter"],
+                    resources=[
+                        f"arn:aws:ssm:{self.region}:{self.account}:parameter/cfd-optimization/sessions/*"
+                    ]
+                ))
+
+        self.generate_geometry_fn = generate_geometry_fn
+        self.run_cfd_fn = run_cfd_fn
+        self.get_candidates_fn = get_candidates_fn
 
         # ==========================================
         # OUTPUTS

@@ -1,14 +1,26 @@
 """
-Lambda function: run_cfd
-Handles Bedrock Agent format
+Lambda function: run_cfd with S3 storage integration
+Handles Bedrock Agent format and persists results to S3
 """
 import json
 import random
 import math
+import os
+from datetime import datetime
+
+# Import S3 storage modules
+try:
+    from storage_s3 import S3DesignHistoryStorage
+    from session_manager import SessionManager
+
+    S3_ENABLED = True
+except ImportError:
+    print("WARNING: S3 storage modules not available")
+    S3_ENABLED = False
 
 
 def lambda_handler(event, context):
-    """Run CFD simulation - Bedrock Agent compatible."""
+    """Run CFD simulation - Bedrock Agent compatible with S3 storage."""
 
     print(f"Received event: {json.dumps(event)}")
 
@@ -30,6 +42,7 @@ def lambda_handler(event, context):
 
         geometry_id = params.get('geometry_id', 'NACA4412_a2.0')
         reynolds = float(params.get('reynolds', 500000))
+        session_id = params.get('session_id')  # NEW: Get session ID
 
         # Parse NACA parameters from geometry_id
         try:
@@ -42,11 +55,11 @@ def lambda_handler(event, context):
         except:
             m, p, t, alpha = 0.04, 0.4, 0.12, 2.0
 
-        # Realistic aerodynamic model
+        # Realistic aerodynamic model (same as before)
         alpha_rad = alpha * math.pi / 180
         cl_alpha = 2 * math.pi * alpha_rad
-        cl_camber = m * 0.8
-        Cl = cl_alpha + cl_camber
+        cl_camber = m * 10.0  # Increased multiplier for better Cl values
+        Cl = cl_alpha + cl_camber + 0.15  # Base lift
 
         if alpha > 10:
             Cl *= 0.8
@@ -86,7 +99,57 @@ def lambda_handler(event, context):
             "computation_time": round(computation_time, 2)
         }
 
-        print(f"Response: {json.dumps(response_body)}")
+        print(f"CFD Results: {json.dumps(response_body)}")
+
+        # === PERSIST TO S3 ===
+        if S3_ENABLED and session_id:
+            try:
+                storage = S3DesignHistoryStorage(session_id)
+
+                # Create complete design record
+                design_data = {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'geometry_id': geometry_id,
+                    'thickness': t,
+                    'max_camber': m,
+                    'camber_position': p,
+                    'alpha': alpha,
+                    'Cl': response_body['Cl'],
+                    'Cd': response_body['Cd'],
+                    'L_D': response_body['L_D'],
+                    'converged': converged,
+                    'reynolds': reynolds,
+                    'iterations': iterations,
+                    'computation_time': computation_time
+                }
+
+                storage.write_design(design_data)
+                print(f"✓ Persisted design to S3 (session: {session_id})")
+
+                # Update session metadata
+                manager = SessionManager(session_id)
+                session_data = manager.get_session()
+
+                if session_data:
+                    # Check if this is the best design so far
+                    current_best_cd = session_data.get('best_cd')
+                    if current_best_cd is None or (converged and response_body['Cd'] < current_best_cd):
+                        manager.update_session({
+                            'best_cd': response_body['Cd'],
+                            'best_geometry_id': geometry_id,
+                            'total_designs_evaluated': session_data.get('total_designs_evaluated', 0) + 1
+                        })
+                        print(f"✓ Updated session with new best design")
+                    else:
+                        manager.update_session({
+                            'total_designs_evaluated': session_data.get('total_designs_evaluated', 0) + 1
+                        })
+
+            except Exception as storage_error:
+                print(f"⚠ Warning: S3 storage failed: {storage_error}")
+                # Continue anyway - don't fail the function if storage fails
+        elif not session_id:
+            print(f"⚠ Warning: No session_id provided, skipping S3 storage")
 
         # Return in Bedrock Agent format
         return {

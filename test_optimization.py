@@ -9,7 +9,7 @@ from pathlib import Path
 
 def load_agent_config():
     """Load agent configuration."""
-    config_path = Path('../agent/agent_config.json')
+    config_path = Path('agent/agent_config.json')
     with open(config_path, 'r') as f:
         return json.load(f)
 

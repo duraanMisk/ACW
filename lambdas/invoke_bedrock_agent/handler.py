@@ -1,10 +1,9 @@
-# lambdas/invoke_bedrock_agent/handler.py
 """
 Invoke Bedrock Agent - Step Functions Wrapper
 
 Purpose: Wrapper Lambda to invoke Bedrock Agent from Step Functions
 - Receives session ID and input text
-- Calls Bedrock Agent
+- Calls Bedrock Agent with session context
 - Returns agent response
 """
 
@@ -26,7 +25,7 @@ AGENT_ALIAS_ID = "TSTALIASID"
 
 def lambda_handler(event, context):
     """
-    Invoke Bedrock Agent.
+    Invoke Bedrock Agent with session context.
 
     Args:
         event: {
@@ -52,12 +51,25 @@ def lambda_handler(event, context):
         logger.info(f"Invoking Bedrock Agent - Session: {session_id}, Iteration: {iteration}")
         logger.info(f"Input text: {input_text}")
 
+        # Enhanced input text with session context
+        # This helps the agent understand which session to work with
+        enhanced_input = f"""
+{input_text}
+
+Session ID: {session_id}
+Current iteration: {iteration}
+
+IMPORTANT: When calling tools (generate_geometry, run_cfd, get_next_candidates), 
+always include the session_id parameter with value "{session_id}".
+This ensures all data is stored in the correct S3 location.
+"""
+
         # Invoke the agent
         response = bedrock_agent.invoke_agent(
             agentId=AGENT_ID,
             agentAliasId=AGENT_ALIAS_ID,
             sessionId=session_id,
-            inputText=input_text
+            inputText=enhanced_input
         )
 
         # Parse the streaming response

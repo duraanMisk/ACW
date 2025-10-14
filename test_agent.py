@@ -9,7 +9,7 @@ from pathlib import Path
 
 def load_agent_config():
     """Load agent configuration."""
-    config_path = Path('../agent/agent_config.json')
+    config_path = Path('agent/agent_config.json')
     if not config_path.exists():
         print("Error: agent_config.json not found")
         print("Have you run setup_bedrock_agent.py?")

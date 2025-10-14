@@ -1,99 +1,86 @@
-# lambdas/initialize_optimization/handler.py
 """
-Initialize CFD Optimization Run - No External Dependencies
+Initialize CFD Optimization Run with S3 Storage - DEBUG VERSION
 
-Purpose: Set up a fresh optimization session
-- Backup existing CSV files
-- Create new empty CSV files with correct schemas
-- Generate unique session ID
-- Return configuration for the optimization loop
+Shows actual import errors instead of hiding them.
 """
 
 import json
 import os
-import csv
 from datetime import datetime
 import uuid
 import logging
+import traceback
 
 # Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Try to import S3 storage modules - SHOW THE ACTUAL ERROR
+S3_ENABLED = False
+IMPORT_ERROR = None
+
+try:
+    from session_manager import SessionManager
+
+    S3_ENABLED = True
+    logger.info("✓ Successfully imported S3 storage modules")
+except Exception as e:
+    IMPORT_ERROR = str(e)
+    logger.error(f"✗ Failed to import S3 modules: {e}")
+    logger.error(f"Traceback: {traceback.format_exc()}")
+    S3_ENABLED = False
+
 
 def lambda_handler(event, context):
     """
-    Initialize optimization run.
-
-    Args:
-        event: {
-            'objective': 'minimize_cd',
-            'cl_min': 0.30,
-            'reynolds': 500000,
-            'max_iter': 8
-        }
-
-    Returns:
-        {
-            'sessionId': 'opt-20251007-143022-a1b2c3d4',
-            'objective': 'minimize_cd',
-            'cl_min': 0.30,
-            'reynolds': 500000,
-            'max_iter': 8,
-            'iteration': 0,
-            'converged': False
-        }
+    Initialize optimization run with S3 storage.
     """
 
     try:
-        logger.info("Starting optimization initialization")
+        logger.info("Starting optimization initialization with S3 storage")
+        logger.info(f"S3_ENABLED: {S3_ENABLED}")
+        if not S3_ENABLED:
+            logger.warning(f"Import error was: {IMPORT_ERROR}")
+
         logger.info(f"Input event: {json.dumps(event)}")
 
         # Generate unique session ID
         session_id = f"opt-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
         logger.info(f"Generated session ID: {session_id}")
 
-        # Define CSV paths
-        csv_dir = '/tmp/data'
-        os.makedirs(csv_dir, exist_ok=True)
-
-        design_history_path = os.path.join(csv_dir, 'design_history.csv')
-        results_path = os.path.join(csv_dir, 'results.csv')
-
-        # Backup existing CSVs if they exist
-        for csv_path in [design_history_path, results_path]:
-            if os.path.exists(csv_path):
-                backup_path = f"{csv_path}.backup-{session_id}"
-                os.rename(csv_path, backup_path)
-                logger.info(f"Backed up {csv_path} to {backup_path}")
-
-        # Create design_history.csv with headers
-        design_columns = [
-            'timestamp', 'geometry_id', 'thickness', 'max_camber',
-            'camber_position', 'alpha', 'Cl', 'Cd', 'L_D',
-            'converged', 'reynolds', 'iterations', 'computation_time'
-        ]
-        with open(design_history_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(design_columns)
-        logger.info(f"Created {design_history_path}")
-
-        # Create results.csv with headers
-        results_columns = [
-            'timestamp', 'iteration', 'candidate_count', 'best_cd',
-            'best_geometry_id', 'strategy', 'trust_radius',
-            'confidence', 'notes'
-        ]
-        with open(results_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(results_columns)
-        logger.info(f"Created {results_path}")
-
         # Extract optimization parameters from input
         objective = event.get('objective', 'minimize_cd')
         cl_min = float(event.get('cl_min', 0.30))
         reynolds = int(event.get('reynolds', 500000))
         max_iter = int(event.get('max_iter', 8))
+
+        # Prepare session configuration
+        config = {
+            'objective': objective,
+            'cl_min': cl_min,
+            'reynolds': reynolds,
+            'max_iter': max_iter
+        }
+
+        # === CREATE SESSION IN S3 ===
+        if S3_ENABLED:
+            try:
+                manager = SessionManager(session_id)
+                session_data = manager.create_session(config)
+                logger.info(f"✓ Created session in S3: {session_id}")
+
+                # Log S3 location
+                bucket = os.environ.get('S3_BUCKET', 'cfd-optimization-data-120569639479')
+                logger.info(f"  S3 Location: s3://{bucket}/sessions/{session_id}/")
+
+            except Exception as s3_error:
+                logger.error(f"Failed to create S3 session: {s3_error}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                # Don't fail the function - continue with local-only mode
+                logger.warning("Continuing without S3 storage")
+        else:
+            logger.warning("S3 storage not enabled - running in local mode")
+            logger.warning(f"Reason: {IMPORT_ERROR}")
 
         # Prepare response
         response = {
@@ -105,7 +92,9 @@ def lambda_handler(event, context):
             'iteration': 0,
             'converged': False,
             'message': 'Optimization initialized successfully',
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            's3_enabled': S3_ENABLED,
+            'import_error': IMPORT_ERROR if not S3_ENABLED else None
         }
 
         logger.info(f"Initialization complete: {json.dumps(response)}")
@@ -121,6 +110,7 @@ def lambda_handler(event, context):
             'statusCode': 500,
             'body': {
                 'error': str(e),
-                'message': 'Failed to initialize optimization'
+                'message': 'Failed to initialize optimization',
+                'traceback': traceback.format_exc()
             }
         }

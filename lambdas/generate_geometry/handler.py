@@ -1,151 +1,163 @@
 """
-Lambda function for airfoil geometry generation with CSV storage integration.
+Lambda function for optimization candidate generation with S3 storage integration.
+Uses trust-region strategy and reads design history from S3.
 """
 
 import json
 import random
 import os
-import sys
 from datetime import datetime
 
-# Add shared directory to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
-
+# Import S3 storage modules
 try:
-    from storage import DesignHistoryStorage
-
-    STORAGE_ENABLED = True
+    from storage_s3 import S3DesignHistoryStorage, S3ResultsStorage
+    from session_manager import SessionManager
+    S3_ENABLED = True
 except ImportError:
-    print("WARNING: Storage module not available, running without persistence")
-    STORAGE_ENABLED = False
+    print("WARNING: S3 storage modules not available")
+    S3_ENABLED = False
 
 
-def validate_naca_parameters(thickness, max_camber, camber_position, alpha):
+def get_optimization_strategy(iteration_number):
     """
-    Validate NACA 4-series parameters.
-
-    Args:
-        thickness: Airfoil thickness as fraction of chord (0.08-0.20)
-        max_camber: Maximum camber as fraction of chord (0.0-0.08)
-        camber_position: Position of max camber as fraction (0.2-0.6)
-        alpha: Angle of attack in degrees (-2 to 10)
+    Determine optimization strategy based on iteration number.
 
     Returns:
-        (valid: bool, warnings: list)
+        (strategy: str, trust_radius: float)
     """
-    warnings = []
-    valid = True
-
-    # Check thickness bounds
-    if thickness < 0.08 or thickness > 0.20:
-        warnings.append(f"Thickness {thickness:.3f} outside recommended range [0.08, 0.20]")
-        valid = False
-    elif thickness > 0.15:
-        warnings.append("High thickness may cause flow separation")
-
-    # Check camber bounds
-    if max_camber < 0.0 or max_camber > 0.08:
-        warnings.append(f"Max camber {max_camber:.3f} outside valid range [0.0, 0.08]")
-        valid = False
-    elif max_camber > 0.06:
-        warnings.append("High camber increases drag and may cause separation")
-
-    # Check camber position bounds
-    if camber_position < 0.2 or camber_position > 0.6:
-        warnings.append(f"Camber position {camber_position:.2f} outside valid range [0.2, 0.6]")
-        valid = False
-    elif camber_position < 0.3:
-        warnings.append("Forward camber position may cause leading edge separation")
-
-    # Check angle of attack bounds
-    if alpha < -2 or alpha > 10:
-        warnings.append(f"Angle of attack {alpha}° outside valid range [-2, 10]")
-        valid = False
-    elif alpha > 8:
-        warnings.append("High angle of attack near stall region")
-
-    return valid, warnings
+    if iteration_number <= 2:
+        return "explore", 0.015
+    elif iteration_number <= 5:
+        return "exploit", 0.010
+    else:
+        return "refine", 0.005
 
 
-def generate_geometry_id(thickness, max_camber, camber_position, alpha):
+def clip_parameter(value, min_val, max_val):
+    """Clip parameter to valid bounds."""
+    return max(min_val, min(max_val, value))
+
+
+def generate_exploration_candidates(num_candidates=4):
     """
-    Generate NACA 4-series identifier.
-
-    Format: NACA{m}{p}{tt}_a{alpha}
-    Example: NACA4412_a2.0
-
-    where:
-        m = max camber in % of chord (first digit)
-        p = position of max camber in tenths of chord (second digit)
-        tt = thickness in % of chord (last two digits)
-        alpha = angle of attack
+    Generate diverse candidates for early exploration.
     """
-    m_digit = int(max_camber * 100)
-    p_digit = int(camber_position * 10)
-    t_digits = int(thickness * 100)
+    candidates = []
 
-    # Format as NACA 4-series
-    naca_code = f"NACA{m_digit}{p_digit}{t_digits:02d}"
-    geometry_id = f"{naca_code}_a{alpha:.1f}"
+    for i in range(num_candidates):
+        thickness = random.uniform(0.10, 0.14)
+        max_camber = random.uniform(0.03, 0.06)
+        camber_position = random.uniform(0.35, 0.45)
+        alpha = random.uniform(1.5, 3.5)
 
-    return geometry_id
+        candidates.append({
+            'thickness': round(thickness, 4),
+            'max_camber': round(max_camber, 4),
+            'camber_position': round(camber_position, 4),
+            'alpha': round(alpha, 4)
+        })
+
+    # Add one "wildcard" for diversity
+    candidates.append({
+        'thickness': round(random.uniform(0.08, 0.20), 4),
+        'max_camber': round(random.uniform(0.0, 0.08), 4),
+        'camber_position': round(random.uniform(0.2, 0.6), 4),
+        'alpha': round(random.uniform(-2, 10), 4)
+    })
+
+    return candidates
 
 
-def calculate_mesh_quality(thickness, max_camber, camber_position):
+def generate_trust_region_candidates(best_design, trust_radius, constraint_cl_min, num_candidates=4):
     """
-    Simulate mesh quality score based on geometry complexity.
+    Generate candidates around the best design using trust-region method.
+    """
+    if not best_design:
+        return generate_exploration_candidates(num_candidates)
 
-    Factors:
-    - Thinner airfoils are harder to mesh well (sharp trailing edge)
-    - High camber creates mesh challenges
-    - Extreme camber positions affect quality
+    candidates = []
+
+    for i in range(num_candidates):
+        thickness = best_design.get('thickness', 0.12) + random.uniform(-trust_radius, trust_radius)
+        max_camber = best_design.get('max_camber', 0.04) + random.uniform(-trust_radius, trust_radius)
+        camber_position = best_design.get('camber_position', 0.40) + random.uniform(-trust_radius, trust_radius)
+        alpha = best_design.get('alpha', 2.0) + random.uniform(-trust_radius * 50, trust_radius * 50)
+
+        # Clip to valid bounds
+        thickness = clip_parameter(thickness, 0.08, 0.20)
+        max_camber = clip_parameter(max_camber, 0.0, 0.08)
+        camber_position = clip_parameter(camber_position, 0.2, 0.6)
+        alpha = clip_parameter(alpha, -2, 10)
+
+        candidates.append({
+            'thickness': round(thickness, 4),
+            'max_camber': round(max_camber, 4),
+            'camber_position': round(camber_position, 4),
+            'alpha': round(alpha, 4)
+        })
+
+    return candidates
+
+
+def analyze_design_history_s3(storage):
+    """
+    Analyze design history from S3 to find best design.
 
     Returns:
-        float: Mesh quality score (0.0 to 1.0)
+        dict with best_design, best_cd, best_cl, iteration_count
     """
-    # Base quality
-    quality = 0.90
+    try:
+        designs = storage.read_all_designs()
 
-    # Thickness penalty (very thin is harder to mesh)
-    if thickness < 0.10:
-        quality -= (0.10 - thickness) * 2.0  # Up to -0.04
+        if not designs:
+            return {
+                'best_design': None,
+                'best_cd': None,
+                'best_cl': None,
+                'iteration_count': 0
+            }
 
-    # Camber penalty (high camber is harder to mesh)
-    if max_camber > 0.05:
-        quality -= (max_camber - 0.05) * 1.5  # Up to -0.045
+        # Filter for converged designs only
+        converged = [d for d in designs if d.get('converged', False)]
 
-    # Camber position penalty (extremes are harder)
-    position_penalty = abs(camber_position - 0.40) * 0.2
-    quality -= position_penalty
+        if not converged:
+            return {
+                'best_design': None,
+                'best_cd': None,
+                'best_cl': None,
+                'iteration_count': len(designs)
+            }
 
-    # Add small random variation
-    quality += random.uniform(-0.05, 0.05)
+        # Find design with lowest Cd
+        best = min(converged, key=lambda d: d.get('Cd', float('inf')))
 
-    # Clamp to valid range
-    quality = max(0.5, min(1.0, quality))
+        best_design = {
+            'thickness': best['thickness'],
+            'max_camber': best['max_camber'],
+            'camber_position': best['camber_position'],
+            'alpha': best['alpha']
+        }
 
-    return quality
+        return {
+            'best_design': best_design,
+            'best_cd': best['Cd'],
+            'best_cl': best['Cl'],
+            'iteration_count': len(designs)
+        }
+
+    except Exception as e:
+        print(f"Error analyzing history: {e}")
+        return {
+            'best_design': None,
+            'best_cd': None,
+            'best_cl': None,
+            'iteration_count': 0
+        }
 
 
 def lambda_handler(event, context):
     """
-    Lambda handler for geometry generation.
-
-    Bedrock Agent sends parameters in this format:
-    {
-        "requestBody": {
-            "content": {
-                "application/json": {
-                    "properties": [
-                        {"name": "thickness", "type": "number", "value": "0.12"},
-                        {"name": "max_camber", "type": "number", "value": "0.04"},
-                        {"name": "camber_position", "type": "number", "value": "0.40"},
-                        {"name": "alpha", "type": "number", "value": "2.0"}
-                    ]
-                }
-            }
-        }
-    }
+    Lambda handler for candidate generation with S3 integration.
     """
     print(f"Received event: {json.dumps(event)}")
 
@@ -162,75 +174,99 @@ def lambda_handler(event, context):
             name = prop.get('name')
             value = prop.get('value')
             if name and value is not None:
-                # Convert string values to appropriate types
-                if prop.get('type') == 'number':
-                    params[name] = float(value)
-                else:
-                    params[name] = value
+                params[name] = value
 
         print(f"Extracted parameters: {params}")
 
         # === VALIDATE REQUIRED PARAMETERS ===
-        required_params = ['thickness', 'max_camber', 'camber_position', 'alpha']
-        missing_params = [p for p in required_params if p not in params]
+        iteration_number = int(params.get('iteration_number', 1))
+        current_best_cd = float(params.get('current_best_cd', 0.015))
+        constraint_cl_min = float(params.get('constraint_cl_min', 0.30))
+        session_id = params.get('session_id')  # NEW: Get session ID
 
-        if missing_params:
-            return create_error_response(f"Missing required parameters: {', '.join(missing_params)}")
+        # Best design is optional
+        best_design = None
+        if 'best_design' in params:
+            try:
+                best_design = json.loads(params['best_design'])
+            except:
+                best_design = None
 
-        thickness = params['thickness']
-        max_camber = params['max_camber']
-        camber_position = params['camber_position']
-        alpha = params['alpha']
+        # === READ DESIGN HISTORY FROM S3 ===
+        history_analysis = None
+        if S3_ENABLED and session_id:
+            try:
+                storage = S3DesignHistoryStorage(session_id)
+                history_analysis = analyze_design_history_s3(storage)
+                print(f"History analysis from S3: {history_analysis}")
 
-        # === VALIDATE PARAMETERS ===
-        valid, warnings = validate_naca_parameters(thickness, max_camber, camber_position, alpha)
+                # Use historical best if we don't have one passed in
+                if not best_design and history_analysis['best_design']:
+                    best_design = history_analysis['best_design']
+                    current_best_cd = history_analysis['best_cd']
+                    print(f"✓ Retrieved best design from S3: Cd={current_best_cd:.5f}")
 
-        # === GENERATE GEOMETRY ===
-        geometry_id = generate_geometry_id(thickness, max_camber, camber_position, alpha)
-        mesh_quality_score = calculate_mesh_quality(thickness, max_camber, camber_position)
+            except Exception as e:
+                print(f"WARNING: Could not read design history from S3: {e}")
+        elif not session_id:
+            print(f"⚠ Warning: No session_id provided, cannot read S3 history")
+
+        # === DETERMINE OPTIMIZATION STRATEGY ===
+        strategy, trust_radius = get_optimization_strategy(iteration_number)
+        print(f"Strategy: {strategy}, Trust radius: {trust_radius}")
+
+        # === GENERATE CANDIDATES ===
+        if strategy == "explore":
+            candidates = generate_exploration_candidates(num_candidates=4)
+            rationale = f"Early exploration phase - sampling diverse design space"
+            confidence = 0.6
+        else:
+            candidates = generate_trust_region_candidates(
+                best_design,
+                trust_radius,
+                constraint_cl_min,
+                num_candidates=4
+            )
+            rationale = f"Trust-region {strategy} (radius={trust_radius:.4f}) around best design"
+            confidence = 0.7 + iteration_number * 0.05
 
         result = {
-            'geometry_id': geometry_id,
-            'valid': valid,
-            'warnings': warnings,
-            'mesh_quality_score': round(mesh_quality_score, 3)
+            'candidates': candidates,
+            'strategy': strategy,
+            'rationale': rationale,
+            'confidence': min(0.95, round(confidence, 2))
         }
 
-        print(f"Generated geometry: {result}")
+        print(f"Generated {len(candidates)} candidates with strategy '{strategy}'")
 
-        # === PERSIST TO CSV ===
-        # Note: We don't write to design_history.csv here because
-        # we don't have aerodynamic results yet. The run_cfd function
-        # will write the complete record with both geometry and aero data.
-        # We could optionally track geometry generation separately if needed.
-
-        if STORAGE_ENABLED:
+        # === PERSIST ITERATION SUMMARY TO S3 ===
+        if S3_ENABLED and session_id:
             try:
-                storage = DesignHistoryStorage()
+                results_storage = S3ResultsStorage(session_id)
 
-                # Optional: Track geometry generation attempts
-                # This helps debug if geometries are being rejected
-                geometry_data = {
+                iteration_data = {
                     'timestamp': datetime.utcnow().isoformat(),
-                    'geometry_id': geometry_id,
-                    'thickness': thickness,
-                    'max_camber': max_camber,
-                    'camber_position': camber_position,
-                    'alpha': alpha,
-                    'valid': valid,
-                    'mesh_quality_score': mesh_quality_score,
-                    'warnings': '; '.join(warnings) if warnings else 'None'
+                    'iteration': iteration_number,
+                    'candidate_count': len(candidates),
+                    'best_cd': current_best_cd,
+                    'best_geometry_id': best_design.get('geometry_id', 'N/A') if best_design else 'N/A',
+                    'strategy': strategy,
+                    'trust_radius': trust_radius,
+                    'confidence': result['confidence']
                 }
 
-                # Write to a separate geometry log (optional)
-                # For now, we'll skip this to avoid duplicate data
-                # storage.write_geometry(geometry_data)
+                results_storage.write_result(iteration_data)
+                print(f"✓ Wrote iteration summary to S3 (session: {session_id})")
 
-                print(f"Geometry tracking prepared (not written to avoid duplication)")
+                # Update session metadata
+                manager = SessionManager(session_id)
+                manager.update_session({
+                    'current_iteration': iteration_number
+                })
 
             except Exception as storage_error:
-                print(f"WARNING: Storage preparation failed: {storage_error}")
-                # Continue anyway - storage failure shouldn't break geometry generation
+                print(f"⚠ Warning: Failed to write to S3: {storage_error}")
+                # Continue anyway
 
         # === RETURN RESPONSE ===
         return create_success_response(result)
@@ -239,7 +275,7 @@ def lambda_handler(event, context):
         print(f"ERROR in lambda_handler: {str(e)}")
         import traceback
         traceback.print_exc()
-        return create_error_response(f"Geometry generation failed: {str(e)}")
+        return create_error_response(f"Candidate generation failed: {str(e)}")
 
 
 def create_success_response(result):
@@ -247,8 +283,8 @@ def create_success_response(result):
     return {
         'messageVersion': '1.0',
         'response': {
-            'actionGroup': 'generate-geometry',
-            'apiPath': '/generate_geometry',
+            'actionGroup': 'get-next-candidates',
+            'apiPath': '/get_next_candidates',
             'httpMethod': 'POST',
             'httpStatusCode': 200,
             'responseBody': {
@@ -265,8 +301,8 @@ def create_error_response(error_message):
     return {
         'messageVersion': '1.0',
         'response': {
-            'actionGroup': 'generate-geometry',
-            'apiPath': '/generate_geometry',
+            'actionGroup': 'get-next-candidates',
+            'apiPath': '/get_next_candidates',
             'httpMethod': 'POST',
             'httpStatusCode': 400,
             'responseBody': {
@@ -278,26 +314,3 @@ def create_error_response(error_message):
             }
         }
     }
-
-
-# For local testing
-if __name__ == "__main__":
-    # Test event
-    test_event = {
-        'requestBody': {
-            'content': {
-                'application/json': {
-                    'properties': [
-                        {'name': 'thickness', 'type': 'number', 'value': '0.12'},
-                        {'name': 'max_camber', 'type': 'number', 'value': '0.04'},
-                        {'name': 'camber_position', 'type': 'number', 'value': '0.40'},
-                        {'name': 'alpha', 'type': 'number', 'value': '2.0'}
-                    ]
-                }
-            }
-        }
-    }
-
-    result = lambda_handler(test_event, None)
-    print("\n=== TEST RESULT ===")
-    print(json.dumps(result, indent=2))

@@ -18,10 +18,13 @@ from aws_cdk import (
     CfnOutput
 )
 from constructs import Construct
-
+from typing import TYPE_CHECKING, Optional
+if TYPE_CHECKING:
+    from .storage_stack import StorageStack
 
 class OrchestrationStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str,
+                 storage_stack: Optional['StorageStack'] = None, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         # Create Lambda execution role with proper permissions
@@ -127,6 +130,27 @@ class OrchestrationStack(Stack):
 
         # Store reference for Step Functions stack
         self.invoke_agent_fn = invoke_agent_fn
+        if storage_stack:
+            print("Granting S3 and SSM access to orchestration Lambdas...")
+
+            # All orchestration Lambdas need S3 read/write
+            orchestration_lambdas = [
+                initialize_fn,
+                check_convergence_fn,
+                generate_report_fn,
+                invoke_agent_fn
+            ]
+
+            for lambda_fn in orchestration_lambdas:
+                storage_stack.bucket.grant_read_write(lambda_fn)
+
+            # invoke_bedrock_agent needs SSM write (sets session_id)
+            invoke_agent_fn.add_to_role_policy(iam.PolicyStatement(
+                actions=["ssm:PutParameter", "ssm:DeleteParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/cfd-optimization/sessions/*"
+                ]
+            ))
 
         # Outputs
         CfnOutput(
