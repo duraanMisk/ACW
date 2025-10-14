@@ -16,7 +16,7 @@ import uuid
 lambda_client = boto3.client('lambda', region_name='us-east-1')
 s3_client = boto3.client('s3', region_name='us-east-1')
 
-BUCKET_NAME = 'cfd-optimization-data-120569639479'
+BUCKET_NAME = "cfd-optimization-data-120569639479-us-east-1"
 
 
 def invoke_lambda(function_name, payload):

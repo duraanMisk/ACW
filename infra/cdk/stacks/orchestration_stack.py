@@ -1,11 +1,10 @@
 # infra/cdk/stacks/orchestration_stack.py
 """
-Orchestration Stack: Lambda functions for Step Functions workflow
+Orchestration Stack: Lambda functions for Step Functions workflow with shared layer
 
-Creates the 3 orchestration Lambda functions:
-- initialize_optimization: Set up new optimization run
-- check_convergence: Determine if optimization should continue
-- generate_report: Generate final summary
+Creates:
+- Lambda Layer with shared S3 modules (session_manager, s3_storage)
+- 4 orchestration Lambda functions with the layer attached
 """
 
 from aws_cdk import (
@@ -18,16 +17,31 @@ from aws_cdk import (
     CfnOutput
 )
 from constructs import Construct
-from typing import TYPE_CHECKING, Optional
-if TYPE_CHECKING:
-    from .storage_stack import StorageStack
+
 
 class OrchestrationStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str,
-                 storage_stack: Optional['StorageStack'] = None, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, storage_stack, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # Create Lambda execution role with proper permissions
+        # Reference the S3 bucket from storage stack
+        bucket = storage_stack.bucket
+
+        # ==========================================
+        # LAMBDA LAYER - Shared Modules
+        # ==========================================
+        print("Creating Lambda Layer for shared modules...")
+
+        shared_layer = lambda_.LayerVersion(
+            self, "SharedModulesLayer",
+            code=lambda_.Code.from_asset("../../lambdas/shared"),
+            compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
+            description="Shared S3 storage and session management modules",
+            layer_version_name="cfd-optimization-shared-modules"
+        )
+
+        # ==========================================
+        # IAM ROLE
+        # ==========================================
         lambda_role = iam.Role(
             self, "OrchestrationLambdaRole",
             assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
@@ -39,80 +53,105 @@ class OrchestrationStack(Stack):
             ]
         )
 
-        # Optional: Add S3 permissions if we want to persist CSVs to S3 later
-        # lambda_role.add_to_policy(iam.PolicyStatement(
-        #     actions=["s3:PutObject", "s3:GetObject"],
-        #     resources=["arn:aws:s3:::cfd-optimization-data/*"]
-        # ))
+        print("Granting S3 and SSM access to orchestration Lambdas...")
+
+        # S3 permissions for optimization data storage
+        lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject",
+                "s3:ListBucket"
+            ],
+            resources=[
+                bucket.bucket_arn,
+                f"{bucket.bucket_arn}/*"
+            ]
+        ))
+
+        # SSM permissions for config
+        lambda_role.add_to_policy(iam.PolicyStatement(
+            effect=iam.Effect.ALLOW,
+            actions=[
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+            ],
+            resources=[
+                f"arn:aws:ssm:{self.region}:{self.account}:parameter/cfd-optimization/*"
+            ]
+        ))
+
+        # ==========================================
+        # LAMBDA FUNCTIONS
+        # ==========================================
+
+        # Common config
+        lambda_config = {
+            "runtime": lambda_.Runtime.PYTHON_3_12,
+            "role": lambda_role,
+            "timeout": Duration.seconds(30),
+            "memory_size": 256,
+            "log_retention": logs.RetentionDays.ONE_WEEK,
+            "layers": [shared_layer],
+            "environment": {
+                "LOG_LEVEL": "INFO",
+                "S3_BUCKET": bucket.bucket_name
+                # AWS_REGION is automatically provided by Lambda - don't set it
+            }
+        }
 
         # 1. Initialize Optimization Function
         initialize_fn = lambda_.Function(
             self, "InitializeOptimization",
             function_name="cfd-initialize-optimization",
-            runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.lambda_handler",
             code=lambda_.Code.from_asset("../../lambdas/initialize_optimization"),
-            role=lambda_role,
-            timeout=Duration.seconds(30),
-            memory_size=256,
-            description="Initialize CFD optimization run - clear CSVs and set up session",
-            environment={
-                "LOG_LEVEL": "INFO"
-            },
-            log_retention=logs.RetentionDays.ONE_WEEK
+            description="Initialize CFD optimization run - create S3 session",
+            **lambda_config
         )
 
         # 2. Check Convergence Function
         check_convergence_fn = lambda_.Function(
             self, "CheckConvergence",
             function_name="cfd-check-convergence",
-            runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.lambda_handler",
             code=lambda_.Code.from_asset("../../lambdas/check_convergence"),
-            role=lambda_role,
-            timeout=Duration.seconds(30),
-            memory_size=256,
-            description="Check optimization convergence criteria - analyze improvement and iteration count",
-            environment={
-                "LOG_LEVEL": "INFO"
-            },
-            log_retention=logs.RetentionDays.ONE_WEEK
+            description="Check optimization convergence criteria",
+            **lambda_config
         )
 
         # 3. Generate Report Function
         generate_report_fn = lambda_.Function(
             self, "GenerateReport",
             function_name="cfd-generate-report",
-            runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.lambda_handler",
             code=lambda_.Code.from_asset("../../lambdas/generate_report"),
-            role=lambda_role,
-            timeout=Duration.seconds(30),
-            memory_size=256,
-            description="Generate optimization summary report - final results and statistics",
-            environment={
-                "LOG_LEVEL": "INFO"
-            },
-            log_retention=logs.RetentionDays.ONE_WEEK
+            description="Generate optimization summary report",
+            **lambda_config
         )
-        # 4. Invoke Bedrock Agent Function (wrapper for Step Functions)
+
+        # 4. Invoke Bedrock Agent Function
         invoke_agent_fn = lambda_.Function(
             self, "InvokeBedrockAgent",
             function_name="cfd-invoke-bedrock-agent",
-            runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.lambda_handler",
             code=lambda_.Code.from_asset("../../lambdas/invoke_bedrock_agent"),
-            role=lambda_role,
-            timeout=Duration.seconds(120),  # Longer timeout for agent
-            memory_size=256,
+            timeout=Duration.seconds(120),
             description="Invoke Bedrock Agent wrapper for Step Functions",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            role=lambda_role,
+            memory_size=256,
+            log_retention=logs.RetentionDays.ONE_WEEK,
+            layers=[shared_layer],
             environment={
-                "LOG_LEVEL": "INFO"
-            },
-            log_retention=logs.RetentionDays.ONE_WEEK
+                "LOG_LEVEL": "INFO",
+                "S3_BUCKET": bucket.bucket_name
+                # AWS_REGION is automatically provided by Lambda
+            }
         )
 
-        # Grant Bedrock permissions to this Lambda
+        # Grant Bedrock permissions to invoke_agent_fn
         invoke_agent_fn.add_to_role_policy(iam.PolicyStatement(
             actions=[
                 "bedrock:InvokeAgent",
@@ -121,38 +160,15 @@ class OrchestrationStack(Stack):
             resources=["*"]
         ))
 
-        # Add output
+        # ==========================================
+        # OUTPUTS
+        # ==========================================
         CfnOutput(
-            self, "InvokeAgentFunctionArn",
-            value=invoke_agent_fn.function_arn,
-            description="Invoke Bedrock Agent Lambda ARN"
+            self, "SharedLayerArn",
+            value=shared_layer.layer_version_arn,
+            description="Shared modules Lambda Layer ARN"
         )
 
-        # Store reference for Step Functions stack
-        self.invoke_agent_fn = invoke_agent_fn
-        if storage_stack:
-            print("Granting S3 and SSM access to orchestration Lambdas...")
-
-            # All orchestration Lambdas need S3 read/write
-            orchestration_lambdas = [
-                initialize_fn,
-                check_convergence_fn,
-                generate_report_fn,
-                invoke_agent_fn
-            ]
-
-            for lambda_fn in orchestration_lambdas:
-                storage_stack.bucket.grant_read_write(lambda_fn)
-
-            # invoke_bedrock_agent needs SSM write (sets session_id)
-            invoke_agent_fn.add_to_role_policy(iam.PolicyStatement(
-                actions=["ssm:PutParameter", "ssm:DeleteParameter"],
-                resources=[
-                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/cfd-optimization/sessions/*"
-                ]
-            ))
-
-        # Outputs
         CfnOutput(
             self, "InitializeFunctionArn",
             value=initialize_fn.function_arn,
@@ -172,6 +188,12 @@ class OrchestrationStack(Stack):
         )
 
         CfnOutput(
+            self, "InvokeAgentFunctionArn",
+            value=invoke_agent_fn.function_arn,
+            description="Invoke Bedrock Agent Lambda ARN"
+        )
+
+        CfnOutput(
             self, "LambdaRoleArn",
             value=lambda_role.role_arn,
             description="Lambda Execution Role ARN"
@@ -181,3 +203,4 @@ class OrchestrationStack(Stack):
         self.initialize_fn = initialize_fn
         self.check_convergence_fn = check_convergence_fn
         self.generate_report_fn = generate_report_fn
+        self.invoke_agent_fn = invoke_agent_fn
