@@ -13,6 +13,10 @@ from datetime import datetime
 import logging
 import os
 
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 # Import S3 storage modules
 try:
     from storage_s3 import S3DesignHistoryStorage, S3ResultsStorage, get_optimization_summary
@@ -20,12 +24,8 @@ try:
 
     S3_ENABLED = True
 except ImportError:
-    print("WARNING: S3 storage modules not available")
+    logger.warning("S3 storage modules not available")
     S3_ENABLED = False
-
-# Set up logging
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
 
 
 def lambda_handler(event, context):
@@ -34,17 +34,20 @@ def lambda_handler(event, context):
 
     Args:
         event: {
+            'sessionId': 'opt-20251007-143022-a1b2c3d4',
             'reason': 'Convergence reason from check_convergence',
-            'cl_min': 0.30,
-            'sessionId': 'opt-20251007-143022-a1b2c3d4'
+            'cl_min': 0.30
         }
 
     Returns:
         {
-            'optimization_summary': {...},
-            'best_design': {...},
-            'performance': {...},
-            'report_text': 'formatted string'
+            'statusCode': 200,
+            'body': {
+                'optimization_summary': {...},
+                'best_design': {...},
+                'performance': {...},
+                'report_text': 'formatted string'
+            }
         }
     """
 
@@ -69,8 +72,6 @@ def lambda_handler(event, context):
 
         try:
             # Get comprehensive optimization summary from S3
-            summary = get_optimization_summary(session_id)
-
             design_storage = S3DesignHistoryStorage(session_id)
             results_storage = S3ResultsStorage(session_id)
 
@@ -126,7 +127,7 @@ def lambda_handler(event, context):
                     'total_iterations': int(total_iterations),
                     'designs_evaluated': int(total_designs_evaluated),
                     'convergence_reason': convergence_reason,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.utcnow().isoformat()
                 },
                 'best_design': {
                     'geometry_id': str(best_design_data.get('geometry_id', 'N/A')),
@@ -187,10 +188,8 @@ S3 LOCATION:
 {'=' * 60}
             """
 
-            # Log the report
             logger.info(report_text)
 
-            # Add text to response
             report['report_text'] = report_text.strip()
 
             # Update session with final status

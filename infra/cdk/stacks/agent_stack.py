@@ -192,3 +192,8 @@ class AgentStack(Stack):
             value="Use AWS Console or CLI to create Bedrock Agent with the Lambda ARNs and Role ARN above",
             description="Next steps for Bedrock Agent setup"
         )
+
+
+
+
+

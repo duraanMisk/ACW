@@ -18,7 +18,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Get S3 bucket from environment
-S3_BUCKET = os.environ.get('S3_BUCKET', 'cfd-optimization-data-120569639479')
+S3_BUCKET = os.environ.get('S3_BUCKET', 'cfd-optimization-data-120569639479-us-east-1')
 
 # Lazy initialization of boto3 client
 _s3_client = None

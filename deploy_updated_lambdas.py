@@ -83,20 +83,21 @@ def create_deployment_package(function_folder, shared_files=None):
             print(f"  ✗ Warning: {handler_path} not found!")
             return None
 
-        # Add shared files
+        # Add shared files from lambdas/shared/python/  <-- CHANGED THIS
         for shared_file in shared_files:
-            shared_path = f'lambdas/shared/{shared_file}'
+            # Try the new location first
+            shared_path = f'lambdas/shared/python/{shared_file}'
             if os.path.exists(shared_path):
                 zip_file.write(shared_path, shared_file)
                 print(f"  ✓ Added {shared_path}")
             else:
-                print(f"  ⚠ Warning: {shared_path} not found (skipping)")
-
-        # Backward compatibility: Also check for old storage.py
-        old_storage_path = 'lambdas/shared/storage.py'
-        if os.path.exists(old_storage_path) and 'storage.py' not in shared_files:
-            zip_file.write(old_storage_path, 'storage.py')
-            print(f"  ✓ Added {old_storage_path} (legacy)")
+                # Fall back to old location
+                old_shared_path = f'lambdas/shared/{shared_file}'
+                if os.path.exists(old_shared_path):
+                    zip_file.write(old_shared_path, shared_file)
+                    print(f"  ✓ Added {old_shared_path}")
+                else:
+                    print(f"  ⚠ Warning: {shared_file} not found in either location (skipping)")
 
     zip_buffer.seek(0)
     return zip_buffer.read()
@@ -147,7 +148,7 @@ def create_function(function_name, zip_content, description):
             Environment={
                 'Variables': {
                     'LOG_LEVEL': 'INFO',
-                    'S3_BUCKET': 'cfd-optimization-data-120569639479'  # Add S3 bucket
+                    'BUCKET_NAME': 'cfd-optimization-data-120569639479-us-east-1'  # Add S3 bucket
                 }
             }
         )
@@ -187,7 +188,7 @@ def update_function(function_name, zip_content):
                 Environment={
                     'Variables': {
                         'LOG_LEVEL': 'INFO',
-                        'S3_BUCKET': 'cfd-optimization-data-120569639479'
+                        'BUCKET_NAME': 'cfd-optimization-data-120569639479-us-east-1'
                     }
                 }
             )

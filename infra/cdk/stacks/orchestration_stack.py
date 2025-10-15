@@ -160,6 +160,18 @@ class OrchestrationStack(Stack):
             resources=["*"]
         ))
 
+        orchestration_lambdas = [
+            initialize_fn,
+            check_convergence_fn,
+            generate_report_fn,
+            invoke_agent_fn  # Might not need S3, but doesn't hurt
+        ]
+
+        for lambda_fn in orchestration_lambdas:
+            storage_stack.bucket.grant_read_write(lambda_fn)
+
+        print("✓ Granted S3 permissions to orchestration Lambdas")
+
         # ==========================================
         # OUTPUTS
         # ==========================================

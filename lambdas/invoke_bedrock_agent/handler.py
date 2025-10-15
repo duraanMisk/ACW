@@ -83,21 +83,19 @@ This ensures all data is stored in the correct S3 location.
         logger.info(f"Agent response length: {len(completion)} characters")
 
         return {
-            'statusCode': 200,
-            'body': {
+
                 'sessionId': session_id,
                 'iteration': iteration,
                 'completion': completion,
                 'message': 'Agent invocation successful'
-            }
+
         }
 
     except Exception as e:
         logger.error(f"Error invoking Bedrock Agent: {str(e)}", exc_info=True)
         return {
-            'statusCode': 500,
-            'body': {
-                'error': str(e),
-                'message': 'Failed to invoke Bedrock Agent'
-            }
+            'response': '',
+            'completion': 'FAILURE',
+            'error': str(e),
+            'message': 'Failed to invoke Bedrock Agent'
         }

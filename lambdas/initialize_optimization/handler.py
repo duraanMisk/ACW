@@ -99,9 +99,19 @@ def lambda_handler(event, context):
 
         logger.info(f"Initialization complete: {json.dumps(response)}")
 
+        # Return data directly for Step Functions (no statusCode wrapper)
         return {
-            'statusCode': 200,
-            'body': response
+            'sessionId': session_id,
+            'objective': objective,
+            'cl_min': cl_min,
+            'reynolds': reynolds,
+            'max_iter': max_iter,
+            'iteration': 0,
+            'converged': False,
+            'message': 'Optimization initialized successfully',
+            'timestamp': datetime.utcnow().isoformat(),
+            's3_enabled': S3_ENABLED,
+            'import_error': IMPORT_ERROR
         }
 
     except Exception as e:

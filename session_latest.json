@@ -1,0 +1,16 @@
+{
+  "session_id": "opt-20251015-005023-214a6e90",
+  "created_at": "2025-10-15T00:50:23.387544",
+  "status": "RUNNING",
+  "config": {
+    "objective": "minimize_cd",
+    "cl_min": 0.3,
+    "reynolds": 500000,
+    "max_iter": 8
+  },
+  "current_iteration": 0,
+  "total_designs_evaluated": 0,
+  "best_cd": null,
+  "best_geometry_id": null,
+  "convergence_reason": null
+}

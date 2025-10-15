@@ -15,6 +15,10 @@
     ]
   },
   "context": {
+    "account": "120569639479",
+    "region": "us-east-1",
+    "bedrock_agent_id": "MXUZMBTQFV",
+    "bedrock_agent_alias_id": "MPGG39Y8EK",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": [

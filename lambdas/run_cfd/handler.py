@@ -1,188 +1,166 @@
-"""
-Lambda function: run_cfd with S3 storage integration
-Handles Bedrock Agent format and persists results to S3
-"""
 import json
-import random
-import math
+import logging
 import os
+import random
 from datetime import datetime
+import boto3
 
-# Import S3 storage modules
-try:
-    from storage_s3 import S3DesignHistoryStorage
-    from session_manager import SessionManager
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-    S3_ENABLED = True
-except ImportError:
-    print("WARNING: S3 storage modules not available")
-    S3_ENABLED = False
+s3 = boto3.client('s3')
+BUCKET_NAME = os.environ['BUCKET_NAME']
 
 
 def lambda_handler(event, context):
-    """Run CFD simulation - Bedrock Agent compatible with S3 storage."""
+    """Handle run_cfd requests from Bedrock Agent"""
+    logger.info(f"Received event: {json.dumps(event)}")
 
-    print(f"Received event: {json.dumps(event)}")
+    # Extract session_id from the EVENT ROOT (not from parameters)
+    session_id = event.get('sessionId')  # <-- CRITICAL FIX
 
-    try:
-        # Extract parameters from Bedrock Agent format
-        params = {}
-        if 'requestBody' in event and 'content' in event['requestBody']:
-            content = event['requestBody']['content']
-            if 'application/json' in content:
-                properties = content['application/json'].get('properties', [])
-                for prop in properties:
-                    value = prop['value']
-                    try:
-                        params[prop['name']] = float(value) if '.' in str(value) else value
-                    except:
-                        params[prop['name']] = value
+    # Extract parameters from requestBody
+    request_body = event.get('requestBody', {})
+    content = request_body.get('content', {})
+    app_json = content.get('application/json', {})
+    properties = app_json.get('properties', [])
 
-        print(f"Extracted parameters: {params}")
+    # Parse parameters
+    params = {}
+    for prop in properties:
+        params[prop['name']] = prop['value']
 
-        geometry_id = params.get('geometry_id', 'NACA4412_a2.0')
-        reynolds = float(params.get('reynolds', 500000))
-        session_id = params.get('session_id')  # NEW: Get session ID
+    logger.info(f"Extracted parameters: {params}")
+    logger.info(f"Session ID: {session_id}")  # <-- Log it
 
-        # Parse NACA parameters from geometry_id
-        try:
-            naca_part = geometry_id.split('_')[0].replace('NACA', '')
-            m = int(naca_part[0]) / 100.0
-            p = int(naca_part[1]) / 10.0
-            t = int(naca_part[2:4]) / 100.0
-            alpha_part = geometry_id.split('_a')[1]
-            alpha = float(alpha_part)
-        except:
-            m, p, t, alpha = 0.04, 0.4, 0.12, 2.0
+    geometry_id = params.get('geometry_id')
+    reynolds = params.get('reynolds', 500000)
 
-        # Realistic aerodynamic model (same as before)
-        alpha_rad = alpha * math.pi / 180
-        cl_alpha = 2 * math.pi * alpha_rad
-        cl_camber = m * 10.0  # Increased multiplier for better Cl values
-        Cl = cl_alpha + cl_camber + 0.15  # Base lift
-
-        if alpha > 10:
-            Cl *= 0.8
-        elif alpha > 8:
-            Cl *= 0.95
-
-        Cd_profile = 0.006 + 0.02 * (t ** 2)
-        AR = 5.0
-        e = 0.85
-        Cd_induced = (Cl ** 2) / (math.pi * AR * e)
-
-        Re_ref = 500000
-        Re_factor = (Re_ref / reynolds) ** 0.2 if reynolds > 0 else 1.0
-
-        Cd = (Cd_profile + Cd_induced) * Re_factor
-        Cd += m * 0.005
-        Cd *= random.uniform(0.995, 1.005)
-        Cl *= random.uniform(0.995, 1.005)
-
-        L_D = Cl / Cd if Cd > 0 else 0
-
-        converged = True
-        iterations = random.randint(180, 250)
-        computation_time = random.uniform(45, 90)
-
-        if t < 0.09 or t > 0.18 or abs(alpha) > 12:
-            if random.random() < 0.05:
-                converged = False
-                iterations = 500
-
-        response_body = {
-            "Cl": round(Cl, 4),
-            "Cd": round(Cd, 5),
-            "L_D": round(L_D, 2),
-            "converged": converged,
-            "iterations": iterations,
-            "computation_time": round(computation_time, 2)
-        }
-
-        print(f"CFD Results: {json.dumps(response_body)}")
-
-        # === PERSIST TO S3 ===
-        if S3_ENABLED and session_id:
-            try:
-                storage = S3DesignHistoryStorage(session_id)
-
-                # Create complete design record
-                design_data = {
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'geometry_id': geometry_id,
-                    'thickness': t,
-                    'max_camber': m,
-                    'camber_position': p,
-                    'alpha': alpha,
-                    'Cl': response_body['Cl'],
-                    'Cd': response_body['Cd'],
-                    'L_D': response_body['L_D'],
-                    'converged': converged,
-                    'reynolds': reynolds,
-                    'iterations': iterations,
-                    'computation_time': computation_time
-                }
-
-                storage.write_design(design_data)
-                print(f"✓ Persisted design to S3 (session: {session_id})")
-
-                # Update session metadata
-                manager = SessionManager(session_id)
-                session_data = manager.get_session()
-
-                if session_data:
-                    # Check if this is the best design so far
-                    current_best_cd = session_data.get('best_cd')
-                    if current_best_cd is None or (converged and response_body['Cd'] < current_best_cd):
-                        manager.update_session({
-                            'best_cd': response_body['Cd'],
-                            'best_geometry_id': geometry_id,
-                            'total_designs_evaluated': session_data.get('total_designs_evaluated', 0) + 1
-                        })
-                        print(f"✓ Updated session with new best design")
-                    else:
-                        manager.update_session({
-                            'total_designs_evaluated': session_data.get('total_designs_evaluated', 0) + 1
-                        })
-
-            except Exception as storage_error:
-                print(f"⚠ Warning: S3 storage failed: {storage_error}")
-                # Continue anyway - don't fail the function if storage fails
-        elif not session_id:
-            print(f"⚠ Warning: No session_id provided, skipping S3 storage")
-
-        # Return in Bedrock Agent format
+    if not geometry_id:
         return {
-            "messageVersion": "1.0",
-            "response": {
-                "actionGroup": event.get('actionGroup'),
-                "apiPath": event.get('apiPath'),
-                "httpMethod": event.get('httpMethod'),
-                "httpStatusCode": 200,
-                "responseBody": {
-                    "application/json": {
-                        "body": json.dumps(response_body)
+            'messageVersion': '1.0',
+            'response': {
+                'actionGroup': event['actionGroup'],
+                'apiPath': event['apiPath'],
+                'httpMethod': event['httpMethod'],
+                'httpStatusCode': 400,
+                'responseBody': {
+                    'application/json': {
+                        'body': json.dumps({
+                            'error': 'geometry_id is required'
+                        })
                     }
                 }
             }
         }
+
+    # Run mock CFD simulation
+    results = run_mock_cfd(geometry_id, reynolds)
+    logger.info(f"CFD Results: {json.dumps(results)}")
+
+    # Save to S3 if session_id is provided
+    if session_id:
+        save_to_s3(session_id, geometry_id, results)
+    else:
+        logger.warning("⚠ Warning: No session_id provided, skipping S3 storage")
+
+    # Return response to agent
+    return {
+        'messageVersion': '1.0',
+        'response': {
+            'actionGroup': event['actionGroup'],
+            'apiPath': event['apiPath'],
+            'httpMethod': event['httpMethod'],
+            'httpStatusCode': 200,
+            'responseBody': {
+                'application/json': {
+                    'body': json.dumps(results)
+                }
+            }
+        }
+    }
+
+
+def run_mock_cfd(geometry_id, reynolds):
+    """Generate realistic mock CFD results"""
+    # Parse NACA code from geometry_id (e.g., "NACA4410_a2.4")
+    parts = geometry_id.split('_')
+    naca_code = parts[0].replace('NACA', '')
+    alpha = float(parts[1].replace('a', '')) if len(parts) > 1 else 2.0
+
+    # Extract NACA parameters
+    max_camber = int(naca_code[0]) / 100.0
+    camber_pos = int(naca_code[1]) / 10.0
+    thickness = int(naca_code[2:4]) / 100.0
+
+    # Realistic aerodynamic correlations
+    Cl = 2 * 3.14159 * (alpha * 3.14159 / 180) + 0.1 * max_camber * 10
+    Cd_profile = 0.006 + 0.3 * thickness ** 2
+    Cd_induced = Cl ** 2 / (3.14159 * 8.0)  # Induced drag
+    Cd = Cd_profile + Cd_induced
+
+    # Add some noise
+    Cl += random.uniform(-0.02, 0.02)
+    Cd += random.uniform(-0.001, 0.001)
+
+    L_D = Cl / Cd if Cd > 0 else 0
+
+    return {
+        'Cl': round(Cl, 4),
+        'Cd': round(Cd, 5),
+        'L_D': round(L_D, 2),
+        'converged': True,
+        'iterations': random.randint(150, 300),
+        'computation_time': round(random.uniform(30, 90), 2)
+    }
+
+
+def save_to_s3(session_id, geometry_id, results):
+    """Save CFD results to S3"""
+    try:
+        timestamp = datetime.utcnow().isoformat()
+
+        # Save individual design result
+        design_key = f"sessions/{session_id}/designs/{geometry_id}.json"
+        design_data = {
+            'geometry_id': geometry_id,
+            'timestamp': timestamp,
+            **results
+        }
+
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=design_key,
+            Body=json.dumps(design_data, indent=2),
+            ContentType='application/json'
+        )
+
+        logger.info(f"Saved design to S3: {design_key}")
+
+        # Append to design_history.csv
+        csv_key = f"sessions/{session_id}/design_history.csv"
+
+        # Try to read existing CSV
+        try:
+            existing = s3.get_object(Bucket=BUCKET_NAME, Key=csv_key)
+            csv_content = existing['Body'].read().decode('utf-8')
+        except s3.exceptions.NoSuchKey:
+            # Create new CSV with header
+            csv_content = "timestamp,geometry_id,Cl,Cd,L_D,converged,iterations,computation_time\n"
+
+        # Append new row
+        csv_row = f"{timestamp},{geometry_id},{results['Cl']},{results['Cd']},{results['L_D']},{results['converged']},{results['iterations']},{results['computation_time']}\n"
+        csv_content += csv_row
+
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=csv_key,
+            Body=csv_content.encode('utf-8'),
+            ContentType='text/csv'
+        )
+
+        logger.info(f"Updated design_history.csv: {csv_key}")
 
     except Exception as e:
-        print(f"ERROR: {str(e)}")
-        import traceback
-        traceback.print_exc()
-
-        return {
-            "messageVersion": "1.0",
-            "response": {
-                "actionGroup": event.get('actionGroup'),
-                "apiPath": event.get('apiPath'),
-                "httpMethod": event.get('httpMethod'),
-                "httpStatusCode": 500,
-                "responseBody": {
-                    "application/json": {
-                        "body": json.dumps({"error": str(e)})
-                    }
-                }
-            }
-        }
+        logger.error(f"Error saving to S3: {str(e)}")
+        raise

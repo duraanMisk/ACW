@@ -1,0 +1,15 @@
+{
+  "timestamp": "2025-10-14T17:33:00.247417",
+  "geometry_id": "NACA4412_a2.0",
+  "thickness": 0.12,
+  "max_camber": 0.04,
+  "camber_position": 0.4,
+  "alpha": 2.0,
+  "Cl": 0.7658,
+  "Cd": 0.05073,
+  "L_D": 15.1,
+  "converged": true,
+  "reynolds": 500000.0,
+  "iterations": 209,
+  "computation_time": 56.9492795318595
+}
