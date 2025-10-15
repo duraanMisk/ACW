@@ -1,3 +1,11 @@
+"""
+Run CFD Simulation with S3 Storage Integration
+
+Enhanced to write both:
+1. Individual design results to designs/
+2. Iteration summaries to iterations/
+"""
+
 import json
 import logging
 import os
@@ -17,7 +25,7 @@ def lambda_handler(event, context):
     logger.info(f"Received event: {json.dumps(event)}")
 
     # Extract session_id from the EVENT ROOT (not from parameters)
-    session_id = event.get('sessionId')  # <-- CRITICAL FIX
+    session_id = event.get('sessionId')
 
     # Extract parameters from requestBody
     request_body = event.get('requestBody', {})
@@ -31,10 +39,11 @@ def lambda_handler(event, context):
         params[prop['name']] = prop['value']
 
     logger.info(f"Extracted parameters: {params}")
-    logger.info(f"Session ID: {session_id}")  # <-- Log it
+    logger.info(f"Session ID: {session_id}")
 
     geometry_id = params.get('geometry_id')
-    reynolds = params.get('reynolds', 500000)
+    reynolds = int(params.get('reynolds', 500000))
+    iteration = int(params.get('iteration', 0))  # NEW: Get iteration number
 
     if not geometry_id:
         return {
@@ -60,7 +69,7 @@ def lambda_handler(event, context):
 
     # Save to S3 if session_id is provided
     if session_id:
-        save_to_s3(session_id, geometry_id, results)
+        save_to_s3(session_id, geometry_id, results, iteration)
     else:
         logger.warning("⚠ Warning: No session_id provided, skipping S3 storage")
 
@@ -115,12 +124,18 @@ def run_mock_cfd(geometry_id, reynolds):
     }
 
 
-def save_to_s3(session_id, geometry_id, results):
-    """Save CFD results to S3"""
+def save_to_s3(session_id, geometry_id, results, iteration):
+    """
+    Save CFD results to S3 in TWO places:
+    1. Individual design result: designs/{geometry_id}.json
+    2. Iteration summary: iterations/iteration_{N}.json
+    """
     try:
         timestamp = datetime.utcnow().isoformat()
 
-        # Save individual design result
+        # ============================================================
+        # PART 1: Save individual design result
+        # ============================================================
         design_key = f"sessions/{session_id}/designs/{geometry_id}.json"
         design_data = {
             'geometry_id': geometry_id,
@@ -135,9 +150,11 @@ def save_to_s3(session_id, geometry_id, results):
             ContentType='application/json'
         )
 
-        logger.info(f"Saved design to S3: {design_key}")
+        logger.info(f"✓ Saved design to S3: {design_key}")
 
-        # Append to design_history.csv
+        # ============================================================
+        # PART 2: Append to design_history.csv
+        # ============================================================
         csv_key = f"sessions/{session_id}/design_history.csv"
 
         # Try to read existing CSV
@@ -159,7 +176,45 @@ def save_to_s3(session_id, geometry_id, results):
             ContentType='text/csv'
         )
 
-        logger.info(f"Updated design_history.csv: {csv_key}")
+        logger.info(f"✓ Updated design_history.csv: {csv_key}")
+
+        # ============================================================
+        # PART 3: NEW - Write iteration summary
+        # ============================================================
+        if iteration > 0:  # Only write iteration summary if iteration number provided
+            iteration_key = f"sessions/{session_id}/iterations/iteration_{iteration:03d}.json"
+
+            # Read current best from design_history to track progress
+            best_cd = results['Cd']
+            try:
+                # Parse CSV to find best Cd so far
+                lines = csv_content.strip().split('\n')[1:]  # Skip header
+                if lines:
+                    cds = [float(line.split(',')[3]) for line in lines if line]
+                    best_cd = min(cds)
+            except:
+                pass
+
+            iteration_data = {
+                'iteration': iteration,
+                'timestamp': timestamp,
+                'geometry_id': geometry_id,
+                'results': results,
+                'best_cd_so_far': best_cd,
+                'candidate_count': 1,  # Single evaluation per iteration in this test
+                'notes': f'CFD evaluation of {geometry_id}'
+            }
+
+            s3.put_object(
+                Bucket=BUCKET_NAME,
+                Key=iteration_key,
+                Body=json.dumps(iteration_data, indent=2),
+                ContentType='application/json'
+            )
+
+            logger.info(f"✓ Saved iteration summary: {iteration_key}")
+        else:
+            logger.info(f"⚠ No iteration number provided, skipping iteration summary")
 
     except Exception as e:
         logger.error(f"Error saving to S3: {str(e)}")

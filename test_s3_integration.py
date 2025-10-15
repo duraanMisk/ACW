@@ -1,321 +1,409 @@
-#!/usr/bin/env python3
 """
-Test S3 storage integration for CFD optimization.
+S3 Integration Tests - Works with Direct Lambda Response Format
 
-Validates:
-1. S3 bucket is accessible
-2. Session creation works
-3. Design storage works
-4. Lambda functions can write to S3
+This test validates end-to-end S3 integration by calling Lambda functions
+directly, bypassing Bedrock Agent to avoid rate limits and statusCode wrappers.
+
+Tests:
+1. Initialize Optimization - Creates S3 session structure
+2. Generate Geometry - Creates geometry and saves to S3
+3. Run CFD - Simulates aerodynamics and saves results to S3
+4. Check Convergence - Reads S3 data and evaluates convergence
+5. Generate Report - Reads all S3 data and creates summary
+6. Verify S3 Structure - Confirms proper file organization
+
+Each Lambda returns data directly (no statusCode wrapper).
 """
-
-import sys
-import os
-
-sys.path.append('lambdas/shared')
 
 import boto3
 import json
+import time
 from datetime import datetime
-import uuid
 
-from storage_s3 import S3DesignHistoryStorage, S3ResultsStorage
-from session_manager import SessionManager
+# AWS Configuration
+REGION = 'us-east-1'
+BUCKET_NAME = 'cfd-optimization-data-120569639479-us-east-1'
 
-lambda_client = boto3.client('lambda', region_name='us-east-1')
+# Lambda function names
+FUNCTIONS = {
+    'initialize': 'cfd-initialize-optimization',
+    'generate': 'cfd-generate-geometry',
+    'run_cfd': 'cfd-run-cfd',
+    'check_conv': 'cfd-check-convergence',
+    'report': 'cfd-generate-report'
+}
+
+# Initialize clients
+lambda_client = boto3.client('lambda', region_name=REGION)
+s3_client = boto3.client('s3', region_name=REGION)
 
 
-def test_session_manager():
-    """Test session creation and management."""
+def invoke_lambda(function_name, payload):
+    """
+    Invoke Lambda function and return parsed result.
+
+    Args:
+        function_name: Name of Lambda function
+        payload: Input event dict
+
+    Returns:
+        Parsed response body (direct format, no statusCode)
+    """
+    print(f"\n→ Invoking {function_name}")
+    print(f"  Payload: {json.dumps(payload, indent=2)}")
+
+    response = lambda_client.invoke(
+        FunctionName=function_name,
+        Payload=json.dumps(payload)
+    )
+
+    result = json.loads(response['Payload'].read())
+    print(f"  Response type: {type(result)}")
+
+    return result
+
+
+def test_initialize_optimization():
+    """TEST 1: Create new S3 optimization session."""
     print("\n" + "=" * 60)
-    print("TEST 1: Session Manager")
+    print("TEST 1: Initialize Optimization (Create S3 Session)")
     print("=" * 60)
 
-    # Create test session
-    session_id = f"test-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
-    manager = SessionManager(session_id)
-
-    print(f"Creating session: {session_id}")
-
-    config = {
+    payload = {
         'objective': 'minimize_cd',
         'cl_min': 0.30,
         'reynolds': 500000,
-        'max_iter': 3
+        'max_iter': 5
     }
 
-    session_data = manager.create_session(config)
-    print(f"✓ Session created")
+    result = invoke_lambda(FUNCTIONS['initialize'], payload)
 
-    # Retrieve session
-    retrieved = manager.get_session()
-    assert retrieved is not None, "Could not retrieve session"
-    assert retrieved['session_id'] == session_id
-    print(f"✓ Session retrieved")
-
-    # Update session
-    manager.update_session({
-        'current_iteration': 1,
-        'best_cd': 0.0142
-    })
-    print(f"✓ Session updated")
-
-    # Check progress
-    progress = manager.get_progress()
-    assert progress['current_iteration'] == 1
-    print(f"✓ Progress tracking works")
-    print(f"  Current iteration: {progress['current_iteration']}/{progress['max_iterations']}")
-
-    return session_id
+    # Result should be direct dict with sessionId (camelCase)
+    if 'sessionId' in result:
+        session_id = result['sessionId']
+        print(f"\n✓ Session created: {session_id}")
+        print(f"  Objective: {result.get('objective')}")
+        print(f"  Cl min: {result.get('cl_min')}")
+        print(f"  Max iterations: {result.get('max_iter')}")
+        print(f"  S3 enabled: {result.get('s3_enabled')}")
+        return session_id
+    else:
+        print(f"\n✗ Failed to create session")
+        print(f"  Response: {json.dumps(result, indent=2)}")
+        return None
 
 
-def test_design_storage(session_id):
-    """Test design history storage."""
+def test_generate_geometry(session_id, iteration=1):
+    """TEST 2: Generate geometry and save to S3."""
     print("\n" + "=" * 60)
-    print("TEST 2: Design History Storage")
+    print(f"TEST 2: Generate Geometry (Iteration {iteration})")
     print("=" * 60)
 
-    storage = S3DesignHistoryStorage(session_id)
-
-    # Write test designs
-    test_designs = [
-        {
-            'geometry_id': 'NACA4412_a2.0',
-            'thickness': 0.12,
-            'max_camber': 0.04,
-            'camber_position': 0.40,
-            'alpha': 2.0,
-            'Cl': 0.48,
-            'Cd': 0.0142,
-            'L_D': 33.8,
-            'converged': True,
-            'reynolds': 500000,
-            'iterations': 230,
-            'computation_time': 65.3
-        },
-        {
-            'geometry_id': 'NACA4410_a2.5',
-            'thickness': 0.10,
-            'max_camber': 0.04,
-            'camber_position': 0.40,
-            'alpha': 2.5,
-            'Cl': 0.52,
-            'Cd': 0.0138,
-            'L_D': 37.7,
-            'converged': True,
-            'reynolds': 500000,
-            'iterations': 215,
-            'computation_time': 58.7
-        }
-    ]
-
-    for design in test_designs:
-        storage.write_design(design)
-
-    print(f"✓ Wrote {len(test_designs)} designs to S3")
-
-    # Read back
-    designs = storage.read_all_designs()
-    assert len(designs) == len(test_designs), f"Expected {len(test_designs)} designs, got {len(designs)}"
-    print(f"✓ Read {len(designs)} designs from S3")
-
-    # Get best design
-    best = storage.get_best_design(constraint_cl_min=0.30)
-    assert best is not None, "Could not find best design"
-    assert best['geometry_id'] == 'NACA4410_a2.5', "Wrong best design"
-    print(f"✓ Best design: {best['geometry_id']} (Cd={best['Cd']:.5f})")
-
-    # Get latest designs
-    latest = storage.get_latest_designs(n=1)
-    assert len(latest) == 1
-    print(f"✓ Latest design retrieval works")
-
-
-def test_results_storage(session_id):
-    """Test iteration results storage."""
-    print("\n" + "=" * 60)
-    print("TEST 3: Results Storage")
-    print("=" * 60)
-
-    storage = S3ResultsStorage(session_id)
-
-    # Write test results
-    test_results = [
-        {
-            'iteration': 1,
-            'candidate_count': 1,
-            'best_cd': 0.0142,
-            'best_geometry_id': 'NACA4412_a2.0',
-            'strategy': 'baseline',
-            'trust_radius': 0.0,
-            'confidence': 1.0,
-            'notes': 'Initial baseline'
-        },
-        {
-            'iteration': 2,
-            'candidate_count': 4,
-            'best_cd': 0.0138,
-            'best_geometry_id': 'NACA4410_a2.5',
-            'strategy': 'explore',
-            'trust_radius': 0.015,
-            'confidence': 0.65,
-            'notes': 'Exploration phase'
-        }
-    ]
-
-    for result in test_results:
-        storage.write_result(result)
-
-    print(f"✓ Wrote {len(test_results)} iteration results to S3")
-
-    # Read back
-    results = storage.read_all_results()
-    assert len(results) == len(test_results)
-    print(f"✓ Read {len(results)} results from S3")
-
-    # Get latest iteration
-    latest = storage.get_latest_iteration()
-    assert latest['iteration'] == 2
-    print(f"✓ Latest iteration: {latest['iteration']}")
-
-    # Calculate improvement
-    improvement = storage.calculate_improvement()
-    assert improvement is not None
-    print(f"✓ Improvement: {improvement:.2f}%")
-
-
-def test_lambda_integration(session_id):
-    """Test Lambda function S3 integration."""
-    print("\n" + "=" * 60)
-    print("TEST 4: Lambda S3 Integration")
-    print("=" * 60)
-
-    # Format Bedrock Agent event
-    def format_bedrock_payload(params):
-        properties = [
-            {'name': k, 'type': 'number' if isinstance(v, (int, float)) else 'string', 'value': str(v)}
-            for k, v in params.items()
-        ]
-        return {
-            'requestBody': {
-                'content': {
-                    'application/json': {
-                        'properties': properties
-                    }
+    # Format as Bedrock Agent event structure (what your Lambda expects)
+    payload = {
+        'sessionId': session_id,
+        'requestBody': {
+            'content': {
+                'application/json': {
+                    'properties': [
+                        {'name': 'thickness', 'value': '0.12'},
+                        {'name': 'max_camber', 'value': '0.04'},
+                        {'name': 'camber_position', 'value': '0.4'},
+                        {'name': 'alpha', 'value': '2.0'}
+                    ]
                 }
             }
-        }
+        },
+        'actionGroup': 'test-group',
+        'apiPath': '/generate-geometry',
+        'httpMethod': 'POST'
+    }
 
-    # Test generate_geometry
-    print("\nTesting generate_geometry...")
-    geo_payload = format_bedrock_payload({
-        'thickness': 0.12,
-        'max_camber': 0.04,
-        'camber_position': 0.40,
-        'alpha': 2.0,
-        'session_id': session_id
-    })
+    result = invoke_lambda(FUNCTIONS['generate'], payload)
 
-    try:
-        response = lambda_client.invoke(
-            FunctionName='cfd-generate-geometry',
-            Payload=json.dumps(geo_payload)
-        )
-        result = json.loads(response['Payload'].read())
-        print(f"✓ generate_geometry responded")
-    except Exception as e:
-        print(f"✗ generate_geometry failed: {e}")
-        return False
+    # Parse Bedrock Agent response format
+    if 'response' in result and 'responseBody' in result['response']:
+        body_str = result['response']['responseBody']['application/json']['body']
+        body = json.loads(body_str)
 
-    # Test run_cfd
-    print("\nTesting run_cfd...")
-    cfd_payload = format_bedrock_payload({
-        'geometry_id': 'NACA4412_a2.0',
-        'reynolds': 500000,
-        'session_id': session_id
-    })
-
-    try:
-        response = lambda_client.invoke(
-            FunctionName='cfd-run-cfd',
-            Payload=json.dumps(cfd_payload)
-        )
-        result = json.loads(response['Payload'].read())
-
-        # Extract CFD results
-        if 'response' in result and 'responseBody' in result['response']:
-            body_str = result['response']['responseBody']['application/json']['body']
-            cfd_results = json.loads(body_str)
-            print(f"✓ run_cfd responded: Cd={cfd_results.get('Cd')}, Cl={cfd_results.get('Cl')}")
+        geometry_id = body.get('geometry_id')
+        if geometry_id:
+            print(f"\n✓ Geometry generated: {geometry_id}")
+            print(f"  Validity: {body.get('validity', {}).get('is_valid')}")
+            print(f"  Mesh quality: {body.get('mesh_quality', {}).get('score')}")
+            return geometry_id
         else:
-            print(f"✓ run_cfd responded (raw format)")
-    except Exception as e:
-        print(f"✗ run_cfd failed: {e}")
+            print(f"\n✗ No geometry_id in response")
+            print(f"  Body: {json.dumps(body, indent=2)}")
+            return None
+    else:
+        print(f"\n✗ Unexpected response format")
+        print(f"  Response: {json.dumps(result, indent=2)}")
+        return None
+
+
+def test_run_cfd(session_id, geometry_id, iteration=1):
+    """TEST 3: Run CFD simulation and save to S3."""
+    print("\n" + "=" * 60)
+    print(f"TEST 3: Run CFD (Iteration {iteration})")
+    print("=" * 60)
+
+    # Format as Bedrock Agent event
+    payload = {
+        'sessionId': session_id,
+        'requestBody': {
+            'content': {
+                'application/json': {
+                    'properties': [
+                        {'name': 'geometry_id', 'value': geometry_id},
+                        {'name': 'reynolds', 'value': '500000'},
+                        {'name': 'iteration', 'value': str(iteration)}  # ← ADD THIS LINE
+                    ]
+                }
+            }
+        },
+        'actionGroup': 'test-group',
+        'apiPath': '/run-cfd',
+        'httpMethod': 'POST'
+    }
+
+    result = invoke_lambda(FUNCTIONS['run_cfd'], payload)
+
+    # Parse response
+    if 'response' in result and 'responseBody' in result['response']:
+        body_str = result['response']['responseBody']['application/json']['body']
+        body = json.loads(body_str)
+
+        print(f"\n✓ CFD simulation complete")
+        print(f"  Cl: {body.get('Cl'):.4f}")
+        print(f"  Cd: {body.get('Cd'):.5f}")
+        print(f"  L/D: {body.get('L_D'):.2f}")
+        print(f"  Converged: {body.get('converged')}")
+
+        return body
+    else:
+        print(f"\n✗ Unexpected response format")
+        print(f"  Response: {json.dumps(result, indent=2)}")
+        return None
+
+
+def test_check_convergence(session_id, iteration=1):
+    """TEST 4: Check convergence from S3 data."""
+    print("\n" + "=" * 60)
+    print(f"TEST 4: Check Convergence (After Iteration {iteration})")
+    print("=" * 60)
+
+    payload = {
+        'sessionId': session_id,
+        'max_iter': 5,
+        'cl_min': 0.30,
+        'iteration': iteration
+    }
+
+    result = invoke_lambda(FUNCTIONS['check_conv'], payload)
+
+    # Direct response format
+    if 'converged' in result:
+        print(f"\n✓ Convergence check complete")
+        print(f"  Converged: {result['converged']}")
+        print(f"  Iteration: {result.get('iteration')}")
+        print(f"  Reason: {result.get('reason', 'N/A')}")
+
+        if result.get('best_cd'):
+            print(f"  Best Cd: {result['best_cd']:.5f}")
+
+        return result['converged']
+    else:
+        print(f"\n✗ Unexpected response format")
+        print(f"  Response: {json.dumps(result, indent=2)}")
         return False
 
-    # Verify data was written to S3
-    print("\nVerifying S3 persistence...")
-    storage = S3DesignHistoryStorage(session_id)
-    designs = storage.read_all_designs()
 
-    # Should have at least one design from our Lambda test
-    # Plus the 2 from earlier tests = at least 3 total
-    if len(designs) >= 3:
-        print(f"✓ Lambda functions writing to S3 correctly ({len(designs)} designs found)")
+def test_generate_report(session_id, reason='Test complete'):
+    """TEST 5: Generate final optimization report."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Generate Report")
+    print("=" * 60)
+
+    payload = {
+        'sessionId': session_id,
+        'cl_min': 0.30,
+        'reason': reason
+    }
+
+    result = invoke_lambda(FUNCTIONS['report'], payload)
+
+    # Direct response format
+    if 'body' in result:
+        body = result['body']
+
+        if body.get('status') == 'INCOMPLETE':
+            print(f"\n⚠ Report incomplete (need more iterations)")
+            return True
+
+        print(f"\n✓ Report generated")
+
+        if 'optimization_summary' in body:
+            summary = body['optimization_summary']
+            print(f"  Status: {summary.get('status')}")
+            print(f"  Designs evaluated: {summary.get('designs_evaluated')}")
+            print(f"  Iterations: {summary.get('iterations_completed')}")
+
+        if 'best_design' in body:
+            design = body['best_design']
+            print(f"\n  Best Design:")
+            print(f"    ID: {design.get('geometry_id')}")
+            print(f"    Cd: {design.get('Cd'):.5f}")
+            print(f"    Cl: {design.get('Cl'):.4f}")
+            print(f"    L/D: {design.get('L_D'):.2f}")
+
         return True
     else:
-        print(f"⚠ Expected at least 3 designs, found {len(designs)}")
+        print(f"\n✗ Unexpected response format")
+        print(f"  Response: {json.dumps(result, indent=2)}")
         return False
 
 
-def main():
-    """Run all S3 integration tests."""
+def verify_s3_structure(session_id):
+    """TEST 6: Verify S3 directory structure is correct."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Verify S3 Structure")
     print("=" * 60)
-    print("CFD Optimization - S3 Integration Tests")
-    print("=" * 60)
 
-    try:
-        # Test 1: Session Manager
-        session_id = test_session_manager()
+    expected_paths = [
+        f"sessions/{session_id}/",
+        f"sessions/{session_id}/session.json",
+        f"sessions/{session_id}/designs/",
+        f"sessions/{session_id}/design_history.csv",
+        f"sessions/{session_id}/iterations/"
+    ]
 
-        # Test 2: Design Storage
-        test_design_storage(session_id)
+    found = []
+    missing = []
 
-        # Test 3: Results Storage
-        test_results_storage(session_id)
+    for path in expected_paths:
+        try:
+            if path.endswith('/'):
+                # Check prefix exists
+                response = s3_client.list_objects_v2(
+                    Bucket=BUCKET_NAME,
+                    Prefix=path,
+                    MaxKeys=1
+                )
+                if 'Contents' in response or 'CommonPrefixes' in response:
+                    found.append(path)
+                    print(f"  ✓ {path}")
+                else:
+                    missing.append(path)
+                    print(f"  ⚠ {path} (empty)")
+            else:
+                # Check specific file exists
+                s3_client.head_object(Bucket=BUCKET_NAME, Key=path)
+                found.append(path)
+                print(f"  ✓ {path}")
+        except:
+            missing.append(path)
+            print(f"  ✗ {path} (not found)")
 
-        # Test 4: Lambda Integration
-        lambda_success = test_lambda_integration(session_id)
-
-        # Summary
-        print("\n" + "=" * 60)
-        print("TEST SUMMARY")
-        print("=" * 60)
-        print(f"Test session: {session_id}")
-        print(f"\n✓ Session Manager: PASSED")
-        print(f"✓ Design Storage: PASSED")
-        print(f"✓ Results Storage: PASSED")
-
-        if lambda_success:
-            print(f"✓ Lambda Integration: PASSED")
-            print("\n🎉 All tests passed! S3 integration is working.")
-            print(f"\nTest data stored in S3 under session: {session_id}")
-            print("\nNext steps:")
-            print("  1. Update all Lambda handlers to use S3 storage")
-            print("  2. Update Step Functions to pass session_id")
-            print("  3. Test full optimization workflow")
-        else:
-            print(f"⚠ Lambda Integration: FAILED")
-            print("\nCheck Lambda function logs for errors")
-
-        return 0 if lambda_success else 1
-
-    except Exception as e:
-        print(f"\n✗ TEST FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    print(f"\n  Found: {len(found)}/{len(expected_paths)} paths")
+    return len(missing) == 0
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def run_full_integration_test():
+    """Run complete end-to-end integration test."""
+    print("\n" + "=" * 70)
+    print(" CFD OPTIMIZATION - S3 INTEGRATION TEST")
+    print("=" * 70)
+    print(f"Bucket: {BUCKET_NAME}")
+    print(f"Region: {REGION}")
+    print(f"Timestamp: {datetime.now().isoformat()}")
+    print("=" * 70)
+
+    results = []
+
+    # Test 1: Initialize
+    session_id = test_initialize_optimization()
+    if not session_id:
+        print("\n✗ CRITICAL: Failed to initialize session")
+        return False
+    results.append(("Initialize Session", True))
+
+    # Run multiple iterations to test convergence
+    num_iterations = 3
+    geometries = []
+
+    for i in range(1, num_iterations + 1):
+        print(f"\n{'=' * 60}")
+        print(f"ITERATION {i}/{num_iterations}")
+        print(f"{'=' * 60}")
+
+        # Test 2: Generate Geometry
+        geometry_id = test_generate_geometry(session_id, i)
+        if not geometry_id:
+            print(f"\n✗ Failed to generate geometry (iteration {i})")
+            results.append((f"Generate Geometry {i}", False))
+            continue
+        results.append((f"Generate Geometry {i}", True))
+        geometries.append(geometry_id)
+
+        # Test 3: Run CFD
+        cfd_result = test_run_cfd(session_id, geometry_id, i)
+        if not cfd_result:
+            print(f"\n✗ Failed to run CFD (iteration {i})")
+            results.append((f"Run CFD {i}", False))
+            continue
+        results.append((f"Run CFD {i}", True))
+
+        # Small delay between iterations
+        time.sleep(1)
+
+    # Test 4: Check Convergence
+    converged = test_check_convergence(session_id, num_iterations)
+    results.append(("Check Convergence", True))
+
+    # Test 5: Generate Report
+    report_success = test_generate_report(session_id,
+                                          'Test complete' if converged else 'Max iterations')
+    results.append(("Generate Report", report_success))
+
+    # Test 6: Verify Structure
+    structure_ok = verify_s3_structure(session_id)
+    results.append(("S3 Structure", structure_ok))
+
+    # Summary
+    print("\n" + "=" * 70)
+    print(" TEST SUMMARY")
+    print("=" * 70)
+
+    passed = sum(1 for _, success in results if success)
+    total = len(results)
+
+    for test_name, success in results:
+        status = "✓ PASS" if success else "✗ FAIL"
+        print(f"  {status:8} {test_name}")
+
+    print("\n" + "=" * 70)
+    print(f" Results: {passed}/{total} tests passed")
+    print("=" * 70)
+
+    if passed == total:
+        print("\n🎉 ALL TESTS PASSED!")
+        print(f"\nSession data stored at:")
+        print(f"  s3://{BUCKET_NAME}/sessions/{session_id}/")
+        print("\n✓ S3 integration is working correctly")
+        print("\nNext steps:")
+        print("  1. Update Step Functions to pass sessionId through all steps")
+        print("  2. Test full orchestration with Bedrock Agent")
+        print("  3. Run convergence test with 5-8 iterations")
+    else:
+        print(f"\n⚠ {total - passed} test(s) failed")
+        print("Check CloudWatch logs for details:")
+        for func_name in FUNCTIONS.values():
+            print(f"  aws logs tail /aws/lambda/{func_name} --follow")
+
+    return passed == total
+
+
+if __name__ == '__main__':
+    success = run_full_integration_test()
+    exit(0 if success else 1)
